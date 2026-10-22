@@ -7,9 +7,11 @@
 // which is an iam permission and not a property of a log.
 //
 // Every adapter — the in-memory one in this package, and the Postgres one
-// a later increment adds — must pass RunLogSuite in suite.go unchanged;
+// a later increment adds — must pass audittest.RunLogSuite unchanged;
 // that suite, not this file, is the authoritative description of the
-// contract's edge-case behaviour.
+// contract's edge-case behaviour. It lives in a sibling package so that a
+// consumer can run it against its own wiring without this package
+// dragging testing into every consumer's production import graph.
 //
 // # Why Verify is a function and not a method
 //
@@ -28,7 +30,7 @@
 // A Detail payload may carry sensitive material, and a verifier runs over
 // material that is, by hypothesis, under an attacker's influence. No error
 // from this package reproduces any of it: a verification failure names a
-// break kind and a sequence number and nothing else. See suite.go's
+// break kind and a sequence number and nothing else. See audittest's
 // NoEventDetailLeaksInErrors subtest, which every adapter exercises.
 package eventlog
 
@@ -94,7 +96,7 @@ const defaultPageSize = 1000
 // a row lock on a per-chain head row, or a unique constraint on the
 // sequence number plus a retry. Two appenders that both read head N
 // produce two entries claiming sequence N+1, and one of them must lose.
-// ConcurrentAppendsProduceOneWellOrderedChain in suite.go is that
+// ConcurrentAppendsProduceOneWellOrderedChain in audittest is that
 // requirement as a test.
 type Log interface {
 	// Append records rec as the next entry in the chain and returns the

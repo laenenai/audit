@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/laenen-ai/audit/audittest"
 	"github.com/laenen-ai/audit/internal/domain"
 	"github.com/laenen-ai/audit/internal/eventlog"
 )
@@ -16,7 +17,7 @@ func newMemoryLog(t *testing.T) eventlog.Log {
 }
 
 func TestMemory_PassesLogSuite(t *testing.T) {
-	eventlog.RunLogSuite(t, newMemoryLog)
+	audittest.RunLogSuite(t, newMemoryLog)
 }
 
 // The suite covers the contract; what follows is specific to this adapter.

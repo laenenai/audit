@@ -1,4 +1,40 @@
-package eventlog
+// Package audittest is the conformance suite for the audit module's Log
+// port: RunLogSuite is the authoritative description of the contract's
+// edge-case behaviour, and an adapter counts as correct when it passes
+// the suite unchanged.
+//
+// It is a sibling package rather than a suite.go inside the port's own
+// package, and rather than a _test.go file, because both alternatives
+// fail a requirement:
+//
+//   - Identifiers declared in a _test.go file are not importable from
+//     outside that package, and this suite must be callable from another
+//     module entirely. CHARTER.md counts a consumer as having adopted
+//     this module when this suite runs green in that consumer's CI
+//     against its own wiring — which is what makes "adopted" testable
+//     rather than asserted, and which a test-only identifier could not
+//     support.
+//   - A non-test file that imports testing makes testing a dependency of
+//     the production package, so every consumer's binary links it and
+//     inherits its flag registrations. Keeping the suite here keeps
+//     testing out of the production import graph.
+//
+// This is the standard library's own shape: net/http/httptest is a
+// sibling of net/http, and testing/fstest.TestFS verifies any fs.FS.
+//
+// The suite imports the module's internal packages, which is legal from
+// inside the module and invisible from outside it: every type in
+// RunLogSuite's signature is re-exported from the root package as an
+// alias, so a consumer writes func(t *testing.T) audit.Log and gets the
+// identical type.
+//
+// Within this file the naming follows one rule: facade names (audit.Entry,
+// audit.Record, audit.VerifyOptions) wherever the facade re-exports the
+// type, so the suite reads the way a consumer's own code reads, and
+// internal names (domain.FirstSequence, eventlog.Verify) only for what the
+// facade deliberately re-exports nothing for yet — constants and the
+// verification functions, which wait for the increment that adds Open.
+package audittest
 
 import (
 	"bytes"
@@ -10,20 +46,17 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/laenen-ai/audit"
 	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenen-ai/audit/internal/eventlog"
 )
 
-// RunLogSuite runs the contract every eventlog.Log adapter must satisfy.
+// RunLogSuite runs the contract every audit.Log adapter must satisfy.
 // newLog is called once per subtest, receiving that subtest's own *T, so
 // an adapter that needs per-test setup and teardown (a scratch schema, a
 // transaction that rolls back, a container it starts) can register it with
 // t.Cleanup inside newLog and get fresh, isolated state for every subtest.
 // Each subtest assumes it is handed an empty log.
-//
-// This file is deliberately not named suite_test.go: RunLogSuite must be
-// importable from another package's own adapter tests, which only works
-// for a regular, non-test-only source file. This mirrors the standard
-// library's testing/fstest.TestFS.
 //
 // Every assertion here must hold for any append-only store — a slice
 // behind a mutex, a Postgres table, an object-store manifest. Nothing here
@@ -40,7 +73,7 @@ import (
 // that fabricated its links, reused a digest, or numbered its entries from
 // zero fails these, which is the point; whether the adapter's own storage
 // can be corrupted is a question about the storage, not about the chain.
-func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
+func RunLogSuite(t *testing.T, newLog func(t *testing.T) audit.Log) {
 	t.Helper()
 
 	t.Run("EmptyLogHasZeroHeadAndVerifiesClean", func(t *testing.T) {
@@ -63,7 +96,7 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 			t.Fatalf("Entries of an empty log returned %d entries", len(entries))
 		}
 
-		got, err := Verify(ctx, log, VerifyOptions{})
+		got, err := eventlog.Verify(ctx, log, audit.VerifyOptions{})
 		if err != nil {
 			t.Fatalf("Verify of an empty log: %v", err)
 		}
@@ -125,7 +158,7 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 		if err != nil {
 			t.Fatalf("Head: %v", err)
 		}
-		want := domain.Checkpoint{Sequence: second.Event.Sequence, Digest: second.Link.Self}
+		want := audit.Checkpoint{Sequence: second.Event.Sequence, Digest: second.Link.Self}
 		if head != want {
 			t.Fatalf("Head = %s, want %s", head, want)
 		}
@@ -135,11 +168,11 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 		log := newLog(t)
 		ctx := context.Background()
 
-		records := []domain.Record{
+		records := []audit.Record{
 			testRecord(1),
 			{Actor: "system", Action: "key.rotate", Outcome: "succeeded"},
-			{Actor: "svc-1", Subject: domain.SubjectRef{Kind: "policy", ID: "p-9"}, Action: "policy.change", Outcome: "denied", Detail: nil},
-			{Actor: "svc-1", Subject: domain.SubjectRef{Kind: "document", ID: "d-1"}, Action: "content.read", Outcome: "partial", Detail: []byte{0x00, 0xff, 0x7f}},
+			{Actor: "svc-1", Subject: audit.SubjectRef{Kind: "policy", ID: "p-9"}, Action: "policy.change", Outcome: "denied", Detail: nil},
+			{Actor: "svc-1", Subject: audit.SubjectRef{Kind: "document", ID: "d-1"}, Action: "content.read", Outcome: "partial", Detail: []byte{0x00, 0xff, 0x7f}},
 			{Actor: "svc-1", Action: "retrieval.query", Outcome: "allowed", Detail: randomDetail(t, domain.MaxDetailLen)},
 		}
 
@@ -175,12 +208,12 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 			t.Fatalf("Head: %v", err)
 		}
 
-		invalid := map[string]domain.Record{
+		invalid := map[string]audit.Record{
 			"no_actor":                {Action: "a", Outcome: "o"},
 			"no_action":               {Actor: "p", Outcome: "o"},
 			"no_outcome":              {Actor: "p", Action: "a"},
-			"subject_kind_without_id": {Actor: "p", Action: "a", Outcome: "o", Subject: domain.SubjectRef{Kind: "document"}},
-			"subject_id_without_kind": {Actor: "p", Action: "a", Outcome: "o", Subject: domain.SubjectRef{ID: "d-1"}},
+			"subject_kind_without_id": {Actor: "p", Action: "a", Outcome: "o", Subject: audit.SubjectRef{Kind: "document"}},
+			"subject_id_without_kind": {Actor: "p", Action: "a", Outcome: "o", Subject: audit.SubjectRef{ID: "d-1"}},
 			"detail_too_large":        {Actor: "p", Action: "a", Outcome: "o", Detail: make([]byte, domain.MaxDetailLen+1)},
 		}
 		for name, rec := range invalid {
@@ -198,7 +231,7 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 		if after != before {
 			t.Fatalf("Head moved from %s to %s: a rejected append consumed a sequence number", before, after)
 		}
-		if _, err := Verify(ctx, log, VerifyOptions{Witness: before}); err != nil {
+		if _, err := eventlog.Verify(ctx, log, audit.VerifyOptions{Witness: before}); err != nil {
 			t.Fatalf("Verify after rejected appends: %v", err)
 		}
 	})
@@ -210,7 +243,7 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 		ctx := context.Background()
 
 		detail := []byte(`{"n":1}`)
-		appended, err := log.Append(ctx, domain.Record{
+		appended, err := log.Append(ctx, audit.Record{
 			Actor: "p", Action: "a", Outcome: "o", Detail: detail,
 		})
 		if err != nil {
@@ -230,7 +263,7 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 		if !bytes.Equal(read[0].Event.Detail, original) {
 			t.Fatalf("stored detail changed when the caller reused its buffer or mutated the returned entry")
 		}
-		if _, err := Verify(ctx, log, VerifyOptions{}); err != nil {
+		if _, err := eventlog.Verify(ctx, log, audit.VerifyOptions{}); err != nil {
 			t.Fatalf("Verify after mutating the caller's buffer: %v", err)
 		}
 	})
@@ -314,7 +347,7 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 		ctx := context.Background()
 
 		const total = 25
-		var last domain.Entry
+		var last audit.Entry
 		for i := 1; i <= total; i++ {
 			appended, err := log.Append(ctx, testRecord(i))
 			if err != nil {
@@ -323,19 +356,19 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 			last = appended
 		}
 
-		want := domain.Checkpoint{Sequence: last.Event.Sequence, Digest: last.Link.Self}
+		want := audit.Checkpoint{Sequence: last.Event.Sequence, Digest: last.Link.Self}
 
 		// Verified with and without a witness, and at a page size that
 		// forces several pages, since a paging bug in an adapter looks
 		// exactly like tampering.
-		for _, opt := range []VerifyOptions{
+		for _, opt := range []audit.VerifyOptions{
 			{},
 			{PageSize: 1},
 			{PageSize: 4},
 			{Witness: want},
-			{Witness: domain.Checkpoint{Sequence: 1, Digest: mustFirstDigest(t, log)}},
+			{Witness: audit.Checkpoint{Sequence: 1, Digest: mustFirstDigest(t, log)}},
 		} {
-			got, err := Verify(ctx, log, opt)
+			got, err := eventlog.Verify(ctx, log, opt)
 			if err != nil {
 				t.Fatalf("Verify(%+v): %v", opt, err)
 			}
@@ -349,15 +382,15 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 		entries := appendAndRead(t, newLog, 5)
 		entries[2].Event.Detail = []byte(`{"tampered":true}`)
 
-		_, err := VerifyEntries(entries, VerifyOptions{})
+		_, err := eventlog.VerifyEntries(entries, audit.VerifyOptions{})
 		assertBreak(t, err, domain.BreakDigestMismatch)
 	})
 
 	t.Run("VerifyDetectsADeletedEntry", func(t *testing.T) {
 		entries := appendAndRead(t, newLog, 5)
-		withHole := append(append([]domain.Entry{}, entries[:2]...), entries[3:]...)
+		withHole := append(append([]audit.Entry{}, entries[:2]...), entries[3:]...)
 
-		_, err := VerifyEntries(withHole, VerifyOptions{})
+		_, err := eventlog.VerifyEntries(withHole, audit.VerifyOptions{})
 		assertBreak(t, err, domain.BreakSequenceMismatch)
 	})
 
@@ -365,7 +398,7 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 		entries := appendAndRead(t, newLog, 5)
 		entries[1], entries[3] = entries[3], entries[1]
 
-		_, err := VerifyEntries(entries, VerifyOptions{})
+		_, err := eventlog.VerifyEntries(entries, audit.VerifyOptions{})
 		assertBreak(t, err, domain.BreakSequenceMismatch)
 	})
 
@@ -376,16 +409,16 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 	// comment.
 	t.Run("VerifyDetectsATruncatedTailOnlyAgainstAWitness", func(t *testing.T) {
 		entries := appendAndRead(t, newLog, 5)
-		witness := domain.Checkpoint{
+		witness := audit.Checkpoint{
 			Sequence: entries[4].Event.Sequence,
 			Digest:   entries[4].Link.Self,
 		}
 		truncated := entries[:3]
 
-		_, err := VerifyEntries(truncated, VerifyOptions{Witness: witness})
+		_, err := eventlog.VerifyEntries(truncated, audit.VerifyOptions{Witness: witness})
 		assertBreak(t, err, domain.BreakTruncated)
 
-		if _, err := VerifyEntries(truncated, VerifyOptions{}); err != nil {
+		if _, err := eventlog.VerifyEntries(truncated, audit.VerifyOptions{}); err != nil {
 			t.Fatalf("a truncated chain with no witness must verify clean, but did not: %v", err)
 		}
 	})
@@ -394,12 +427,12 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 	// removed but replaced with a different, internally consistent one.
 	t.Run("VerifyDetectsAReplacedSuffixAgainstAWitness", func(t *testing.T) {
 		entries := appendAndRead(t, newLog, 5)
-		witness := domain.Checkpoint{
+		witness := audit.Checkpoint{
 			Sequence: entries[4].Event.Sequence,
 			Digest:   entries[4].Link.Self,
 		}
 
-		forged := make([]domain.Entry, len(entries))
+		forged := make([]audit.Entry, len(entries))
 		copy(forged, entries)
 		forged[3].Event.Detail = []byte(`{"forged":true}`)
 		prev := forged[2].Link.Self
@@ -408,10 +441,10 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 			prev = forged[i].Link.Self
 		}
 
-		if _, err := VerifyEntries(forged, VerifyOptions{}); err != nil {
+		if _, err := eventlog.VerifyEntries(forged, audit.VerifyOptions{}); err != nil {
 			t.Fatalf("the forged chain should be internally consistent, so that only the witness catches it: %v", err)
 		}
-		_, err := VerifyEntries(forged, VerifyOptions{Witness: witness})
+		_, err := eventlog.VerifyEntries(forged, audit.VerifyOptions{Witness: witness})
 		assertBreak(t, err, domain.BreakCheckpointMismatch)
 	})
 
@@ -437,9 +470,9 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 			go func() {
 				defer wg.Done()
 				for i := range appendsPerWorker {
-					rec := domain.Record{
-						Actor:   domain.ActorID(fmt.Sprintf("worker-%d", g)),
-						Subject: domain.SubjectRef{Kind: "document", ID: fmt.Sprintf("doc-%d-%d", g, i)},
+					rec := audit.Record{
+						Actor:   audit.ActorID(fmt.Sprintf("worker-%d", g)),
+						Subject: audit.SubjectRef{Kind: "document", ID: fmt.Sprintf("doc-%d-%d", g, i)},
 						Action:  "content.read",
 						Outcome: "allowed",
 						Detail:  []byte(fmt.Sprintf(`{"worker":%d,"i":%d}`, g, i)),
@@ -459,7 +492,7 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 			}
 		}
 
-		head, err := Verify(ctx, log, VerifyOptions{PageSize: 10})
+		head, err := eventlog.Verify(ctx, log, audit.VerifyOptions{PageSize: 10})
 		if err != nil {
 			t.Fatalf("Verify after concurrent appends: %v", err)
 		}
@@ -502,8 +535,8 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 
 		const sentinel = "sentinel-5d2e8c-do-not-leak-this-value"
 
-		oversized := domain.Record{
-			Actor:   domain.ActorID(sentinel),
+		oversized := audit.Record{
+			Actor:   audit.ActorID(sentinel),
 			Action:  "content.read",
 			Outcome: "allowed",
 			Detail:  append([]byte(sentinel), make([]byte, domain.MaxDetailLen)...),
@@ -516,8 +549,8 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 			t.Fatalf("Append error leaked event content: %v", err)
 		}
 
-		appended, err := log.Append(ctx, domain.Record{
-			Actor:   domain.ActorID(sentinel),
+		appended, err := log.Append(ctx, audit.Record{
+			Actor:   audit.ActorID(sentinel),
 			Action:  "content.read",
 			Outcome: "allowed",
 			Detail:  []byte(sentinel),
@@ -526,9 +559,9 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 			t.Fatalf("Append: %v", err)
 		}
 
-		tampered := []domain.Entry{appended.Clone()}
+		tampered := []audit.Entry{appended.Clone()}
 		tampered[0].Event.Detail = []byte(sentinel + "-modified")
-		if _, err := VerifyEntries(tampered, VerifyOptions{}); err == nil {
+		if _, err := eventlog.VerifyEntries(tampered, audit.VerifyOptions{}); err == nil {
 			t.Fatal("tampering was not detected")
 		} else if strings.Contains(err.Error(), sentinel) {
 			t.Fatalf("verification error leaked event content: %v", err)
@@ -562,10 +595,10 @@ func RunLogSuite(t *testing.T, newLog func(t *testing.T) Log) {
 }
 
 // testRecord returns a valid record distinguishable by n.
-func testRecord(n int) domain.Record {
-	return domain.Record{
+func testRecord(n int) audit.Record {
+	return audit.Record{
 		Actor:   "principal-1",
-		Subject: domain.SubjectRef{Kind: "document", ID: fmt.Sprintf("doc-%d", n)},
+		Subject: audit.SubjectRef{Kind: "document", ID: fmt.Sprintf("doc-%d", n)},
 		Action:  "content.read",
 		Outcome: "allowed",
 		Detail:  []byte(fmt.Sprintf(`{"n":%d}`, n)),
@@ -577,7 +610,7 @@ func testRecord(n int) domain.Record {
 // nil, since the canonical encoding length-prefixes and cannot tell them
 // apart — an adapter whose storage normalizes one to the other is not
 // wrong.
-func assertRecordRoundTrip(t *testing.T, want domain.Record, got domain.Event) {
+func assertRecordRoundTrip(t *testing.T, want audit.Record, got audit.Event) {
 	t.Helper()
 
 	if got.Actor != want.Actor {
@@ -601,7 +634,7 @@ func assertRecordRoundTrip(t *testing.T, want domain.Record, got domain.Event) {
 // back out of the log — the material the tamper subtests work on. Reading
 // them back rather than keeping what Append returned is deliberate: it is
 // the stored chain, not the returned value, that a verifier later sees.
-func appendAndRead(t *testing.T, newLog func(t *testing.T) Log, n int) []domain.Entry {
+func appendAndRead(t *testing.T, newLog func(t *testing.T) audit.Log, n int) []audit.Entry {
 	t.Helper()
 
 	log := newLog(t)
@@ -619,15 +652,15 @@ func appendAndRead(t *testing.T, newLog func(t *testing.T) Log, n int) []domain.
 	if len(entries) != n {
 		t.Fatalf("read back %d entries, want %d", len(entries), n)
 	}
-	if _, err := VerifyEntries(entries, VerifyOptions{}); err != nil {
+	if _, err := eventlog.VerifyEntries(entries, audit.VerifyOptions{}); err != nil {
 		t.Fatalf("the chain this adapter produced does not verify before any tampering: %v", err)
 	}
 	return entries
 }
 
 // readAll pages the whole log into a slice.
-func readAll(ctx context.Context, log Log, pageSize int) ([]domain.Entry, error) {
-	var all []domain.Entry
+func readAll(ctx context.Context, log audit.Log, pageSize int) ([]audit.Entry, error) {
+	var all []audit.Entry
 	for from := domain.FirstSequence; ; {
 		page, err := log.Entries(ctx, from, pageSize)
 		if err != nil {
@@ -645,15 +678,15 @@ func readAll(ctx context.Context, log Log, pageSize int) ([]domain.Entry, error)
 }
 
 // assertBreak checks that err reports a broken chain of the given kind.
-func assertBreak(t *testing.T, err error, kind domain.BreakKind) {
+func assertBreak(t *testing.T, err error, kind audit.BreakKind) {
 	t.Helper()
 
 	if !errors.Is(err, domain.ErrChainBroken) {
 		t.Fatalf("error = %v, want it to match domain.ErrChainBroken", err)
 	}
-	var chainErr *domain.ChainError
+	var chainErr *audit.ChainError
 	if !errors.As(err, &chainErr) {
-		t.Fatalf("error = %v, want a *domain.ChainError", err)
+		t.Fatalf("error = %v, want a *audit.ChainError", err)
 	}
 	if chainErr.Kind != kind {
 		t.Fatalf("break kind = %q, want %q", chainErr.Kind, kind)
@@ -662,7 +695,7 @@ func assertBreak(t *testing.T, err error, kind domain.BreakKind) {
 
 // mustFirstDigest returns the genesis entry's digest, for use as a witness
 // at a position other than the head.
-func mustFirstDigest(t *testing.T, log Log) domain.Digest {
+func mustFirstDigest(t *testing.T, log audit.Log) audit.Digest {
 	t.Helper()
 
 	page, err := log.Entries(context.Background(), domain.FirstSequence, 1)
