@@ -1,0 +1,231 @@
+# Public API of github.com/laenen-ai/audit, as a golden file.
+#
+# Regenerate with: go test . -run TestAPIGolden -update-api
+#
+# "package audit" is the facade a consumer imports; "package audittest" is
+# the conformance suite it runs against its own wiring. The internal
+# packages are listed too, because the facade re-exports their types as
+# aliases: a change to one of those signatures changes what a consumer
+# sees, even though the import path itself is private. Growing this file is
+# a reviewed diff — see CHARTER.md.
+
+package audit // .
+
+type Action = domain.Action
+
+type ActorID = domain.ActorID
+
+type BreakKind = domain.BreakKind
+
+type ChainError = domain.ChainError
+
+type ChainLink = domain.ChainLink
+
+type Checkpoint = domain.Checkpoint
+
+type Clock = domain.Clock
+
+type Digest = domain.Digest
+
+type Entry = domain.Entry
+
+var ErrChainBroken = domain.ErrChainBroken
+
+var ErrInvalidArgument = domain.ErrInvalidArgument
+
+var ErrInvalidRecord = domain.ErrInvalidRecord
+
+var ErrMalformedDigest = domain.ErrMalformedDigest
+
+var ErrMalformedEventID = domain.ErrMalformedEventID
+
+type Event = domain.Event
+
+type EventID = domain.EventID
+
+type FixedClock = domain.FixedClock
+
+type Log = eventlog.Log
+
+type Outcome = domain.Outcome
+
+type Record = domain.Record
+
+type SubjectRef = domain.SubjectRef
+
+type SystemClock = domain.SystemClock
+
+type VerifyOptions = eventlog.VerifyOptions
+
+package audittest // audittest
+
+func RunLogSuite(t *testing.T, newLog func(t *testing.T) audit.Log)
+
+package domain // internal/domain
+
+type Action string
+
+type ActorID string
+
+const BreakCheckpointMismatch BreakKind = "checkpoint_mismatch"
+
+const BreakDigestMismatch BreakKind = "digest_mismatch"
+
+const BreakHeadMismatch BreakKind = "head_mismatch"
+
+type BreakKind string
+
+const BreakLinkMismatch BreakKind = "link_mismatch"
+
+const BreakSequenceMismatch BreakKind = "sequence_mismatch"
+
+const BreakTruncated BreakKind = "truncated"
+
+func CanonicalTime(t time.Time) time.Time
+
+type ChainError struct {
+	Kind BreakKind
+	Sequence uint64
+}
+
+func (*ChainError) Error() string
+
+func (*ChainError) Unwrap() error
+
+type ChainLink struct {
+	Prev Digest
+	Self Digest
+}
+
+type Checkpoint struct {
+	Sequence uint64
+	Digest Digest
+}
+
+func (Checkpoint) IsZero() bool
+
+func (Checkpoint) String() string
+
+type Clock interface {
+	Now() time.Time
+}
+
+type Digest [sha256.Size]byte
+
+func (Digest) Equal(other Digest) bool
+
+func (Digest) IsZero() bool
+
+func (Digest) String() string
+
+type Entry struct {
+	Event Event
+	Link ChainLink
+}
+
+func (Entry) Clone() Entry
+
+func (Entry) ComputeDigest() Digest
+
+func EntryDigest(prev Digest, e Event) Digest
+
+var ErrChainBroken = errors.New("audit: chain broken")
+
+var ErrInvalidArgument = errors.New("audit: invalid argument")
+
+var ErrInvalidRecord = errors.New("audit: invalid record")
+
+var ErrMalformedDigest = errors.New("audit: malformed digest")
+
+var ErrMalformedEventID = errors.New("audit: malformed event id")
+
+type Event struct {
+	ID EventID
+	Sequence uint64
+	Timestamp time.Time
+	Actor ActorID
+	Subject SubjectRef
+	Action Action
+	Outcome Outcome
+	Detail []byte
+}
+
+func (Event) Clone() Event
+
+type EventID string
+
+func (EventID) Time() time.Time
+
+const FirstSequence uint64 = 1
+
+type FixedClock struct {
+	// has unexported fields
+}
+
+func (*FixedClock) Advance(d time.Duration)
+
+func (*FixedClock) Now() time.Time
+
+const MaxDetailLen = 64 * 1024
+
+func NewChainError(kind BreakKind, sequence uint64) *ChainError
+
+func NewEntry(prev Digest, e Event) Entry
+
+func NewEvent(id EventID, sequence uint64, at time.Time, rec Record) Event
+
+func NewEventID(clock Clock) (EventID, error)
+
+func NewFixedClock(t time.Time) *FixedClock
+
+type Outcome string
+
+func ParseDigest(s string) (Digest, error)
+
+func ParseEventID(s string) (EventID, error)
+
+type Record struct {
+	Actor ActorID
+	Subject SubjectRef
+	Action Action
+	Outcome Outcome
+	Detail []byte
+}
+
+func (Record) Clone() Record
+
+func (Record) Validate() error
+
+type SubjectRef struct {
+	Kind string
+	ID string
+}
+
+func (SubjectRef) IsZero() bool
+
+type SystemClock struct{}
+
+func (SystemClock) Now() time.Time
+
+package eventlog // internal/eventlog
+
+type Log interface {
+	Append(ctx context.Context, rec domain.Record) (domain.Entry, error)
+	Head(ctx context.Context) (domain.Checkpoint, error)
+	Entries(ctx context.Context, from uint64, limit int) ([]domain.Entry, error)
+}
+
+type MemoryConfig struct {
+	Clock domain.Clock
+}
+
+func NewMemory(cfg MemoryConfig) Log
+
+func Verify(ctx context.Context, log Log, opt VerifyOptions) (domain.Checkpoint, error)
+
+func VerifyEntries(entries []domain.Entry, opt VerifyOptions) (domain.Checkpoint, error)
+
+type VerifyOptions struct {
+	Witness domain.Checkpoint
+	PageSize int
+}
