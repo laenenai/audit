@@ -112,3 +112,66 @@ Queryability (§8.5's read receipts, tenant-facing audit queries by principal,
 resource and time) is ordinary indexing over the same table. The rule is that
 verification walks the chain and queries use indexes — an index is never
 allowed to become the record.
+
+## 6. Yes to migrations — owned by this module, in its own schema
+
+Owner's question, 2026-10-23: should the module ship a Postgres backend and its
+migrations? Yes to both, and the *how* is a cross-module decision rather than
+an `audit` one.
+
+The tension: these tables live in the **consumer's** database, next to CAS's
+own schema and CAS's goose sequence. Two independent migration owners writing
+one database collide on goose's single version table.
+
+**Decision: each shared module owns a Postgres schema and its own version
+table, and exposes one `Migrate` function.**
+
+- `audit` owns schema `audit`, with its version table inside it
+  (`audit.goose_db_version`). `iam`, `tenancy` and the rest do the same when
+  they get there. Independent sequences, no shared ordering, no collision.
+- Migrations are embedded in the binary and applied by the library, which is
+  CAS anti-goal A1's existing requirement ("schema migrations embedded in the
+  binary and applied by the library"), not a new idea.
+- The adapter takes a narrow `DB` interface the module declares, satisfied by
+  `tenancy`'s data-plane handle, so `audit` depends on `pgx` and not on
+  `tenancy`.
+
+A schema per module is also what makes eight modules sharing one database
+tractable rather than a naming convention held together by hope — and it is the
+unit privilege separation needs, which `audit` needs more than most.
+
+### The wrinkle in A1, stated rather than discovered
+
+§2 above requires that the application role **cannot** `UPDATE`, `DELETE` or
+`TRUNCATE` the audit tables. That has to be granted by the migration, which
+therefore runs as a role the application is not. So this module's deployment
+needs **two identities**: an owner role that migrates, and an app role that
+inserts and selects.
+
+That is ordinary practice, and it is a genuine qualification of A1's "one
+Postgres connection string": either two DSNs (owner for migration, app for
+runtime), or one owner DSN with a `SET ROLE` to the app role for runtime work.
+The second keeps A1's single-string promise and is the default; the first is
+available for deployments that separate them operationally. The app role's name
+is configuration, because the migration must name it in its `REVOKE`.
+
+A deployment that declines privilege separation gets a working audit log with
+**no enforcement of append-only** beyond the Go API — which is to say, none
+against a compromised application. The adapter must detect that at open time
+and say so loudly rather than pretending.
+
+### What the first migration must get right, because it cannot be changed later
+
+- **Declarative partitioning, chosen at creation**: hash by tenant, range by
+  time within each hash partition. CAS §12.2 settled this and said why —
+  "converting a populated table to a partitioned one is an outage." Retention
+  is then a partition drop (§3), which is the only form of deletion a hash
+  chain tolerates.
+- **The head row is the single writable surface.** One row per
+  `(tenant, pool)` chain carrying the latest sequence and digest. It must be
+  updatable, so it is the exception to the revoke; it holds no history, so
+  rewriting it cannot rewrite the chain — only make verification fail.
+- **RLS on every table**, behind application-level scoping, as everywhere else.
+- Indexes for §8.5's queries — principal, resource, time, link id for read
+  receipts — with the standing rule that **verification walks the chain and
+  queries use indexes; an index is never the record.**
