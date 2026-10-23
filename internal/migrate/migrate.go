@@ -162,16 +162,16 @@ type Applied struct {
 // cfg.AppRole. That is the owner identity, and it is deliberately not the
 // identity the application runs as: the whole of this module's append-only
 // guarantee is that the application cannot UPDATE or DELETE what the owner
-// created. A deployment may keep that as two DSNs, or as one owner DSN that
-// the runtime narrows with SET ROLE; this module does not care which, and
-// pglog.Open reports loudly if the result is that no separation exists.
-//
-// Up is safe to call concurrently, from goroutines or from separate
-// processes against the same database: goose's migrations are serialized by
-// the advisory lock on lockKey, and the two reconciliation layers take the
-// same lock for their own transaction. Calling Up against an already-current
-// database applies nothing new, extends the partition window if time has
-// moved on, re-asserts the privileges, and returns nil.
+// This module is handed a **migration pool** holding the migration rights, and
+// runtime work uses a separate per-tenant pool on the application role. Those
+// are two different credentials, not two states of one session: `SET ROLE` is
+// reversible with `RESET ROLE`, so a single owner connection switching roles
+// makes privilege separation per-session and dependent on every path
+// remembering to set it — and forgetting to set it is a silent escalation.
+// Two pools make it structural: the runtime credential does not possess the
+// mutating rights at all. Open the migration pool, migrate, close it; a
+// long-lived owner pool in the process is a standing escalation target for no
+// benefit, since migration is a startup activity.
 func Up(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	resolved, err := cfg.resolve()
 	if err != nil {
