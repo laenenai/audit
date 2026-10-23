@@ -58,58 +58,50 @@
 // reading, so the digest depends on the instant and nothing else — see
 // TestEntryDigestIgnoresLocationAndMonotonicReading.
 //
-// # Changing the format, and the one time it has changed
+// # Changing the format
 //
-// The encoding is a persistence format: every chain ever written was
-// hashed with it, and re-hashing them with a different one would report
-// every historical entry as tampered. A change therefore requires a new
-// canonicalVersion byte *and* a new entryDomainTag, and — once a deployment
-// holds entries written under more than one version — a verifier that
-// dispatches on the version byte of the entry it is checking.
+// The encoding is a persistence format: every chain ever written is hashed
+// with it, and re-hashing with a different one would report every historical
+// entry as tampered. A change therefore requires a new canonicalVersion byte
+// *and* a new entryDomainTag, and — once a deployment holds entries written
+// under more than one version — a verifier that dispatches on the version byte
+// of the entry it is checking.
 //
-// Version history:
+// Version history: **0x01**, tag "audit:entry:v1". That is the whole history,
+// and deliberately so.
 //
-//   - **0x01**, tag "laenenai/audit:entry:v1". Fields 4 onwards of the list
-//     above, with no chain identifier: the first increment treated one Log as
-//     one chain, so there was nothing to name. Its recorded test vector is
-//     kept, still reproducible from a frozen reference encoder, in
-//     TestEntryDigestGoldenVectorV1.
-//   - **0x02**, tag "laenenai/audit:entry:v2", current. Adds Chain.Tenant and
-//     Chain.Pool immediately after the version byte, because a shared store
+// # Why there is no version 2, after there briefly was one
+//
+// Two format changes happened on 2026-10-23, before this module had ever
+// written a durable byte, and both were collapsed into version 1 rather than
+// left as archaeology:
+//
+//   - A chain identifier was added to the envelope, because a shared store
 //     holds many chains and an entry that does not commit to its own chain can
-//     be moved between them.
+//     be moved between them. That was initially a version 2 with a frozen
+//     version 1 encoder kept in the tests to demonstrate the bump.
+//   - A module-path correction then rewrote entryDomainTag by textual
+//     substitution — the tag is a cryptographic input to every digest — and
+//     invalidated both recorded vectors. The golden-vector tests caught it;
+//     local verification did not, because `go test` served cached results.
 //
-// # The domain tag was rewritten once, by accident, and that must not recur
+// Neither version ever reached storage: version 1 shipped with an in-memory
+// adapter only. So a version history describing a transition that affected
+// nothing is misleading rather than careful, and a frozen reference encoder
+// proving that bump has no audience. Both are gone, and the format starts at
+// 1 with a single recorded vector.
 //
-// On 2026-10-23 the module path was corrected from github.com/laenen-ai to
-// github.com/laenenai, by textual substitution across the repository. The
-// substitution also rewrote entryDomainTag — which is a **cryptographic input
-// to every entry digest** — so both recorded vectors stopped matching, and the
-// golden-vector tests caught it. They were doing exactly their job.
+// The tag also no longer contains an organisation or module name. It used to be
+// "laenenai/audit:entry:v2", which is how a textual rename reached a
+// cryptographic constant in the first place; "audit:entry:v1" cannot be
+// rewritten by correcting a repository's location. TestEntryDomainTagIsPinned
+// asserts the literal, so the next edit to it reports itself by name rather
+// than as two mismatched digests.
 //
-// The vectors were recomputed under the corrected tag rather than the tag being
-// restored, because that was still safe *on that day and never again*: version
-// 1 had shipped in-memory-only and version 2 was hours old, so no durable chain
-// existed anywhere to be invalidated. Had any deployment been storing entries,
-// the only correct response would have been a version 3.
-//
-// Two conclusions, both now enforced below rather than remembered:
-//
-//   - A domain tag must not be reachable by a find-and-replace over the module
-//     path. TestEntryDomainTagIsPinned asserts the exact literal, so the next
-//     time something edits it the failure says "the domain tag changed" instead
-//     of making a reader work backwards from two mismatched digests.
-//   - A rename is not a refactor when it touches a cryptographic constant. The
-//     same hazard, deriving a coordination constant from an import path, is
-//     benign for an advisory lock key (a different lock is still a valid lock)
-//     and destructive here.
-//
-// There is deliberately no version-1 *decoder* and no dual-version verifier.
-// Version 1 shipped with an in-memory adapter only — nothing durable was ever
-// written under it, so there is no historical chain in the world to keep
-// verifiable, and a compatibility path with no data behind it is a liability
-// rather than a kindness. The frozen version 1 encoder in the tests exists to
-// prove the version actually changed, not to read anything.
+// **This was free exactly once.** From here, nothing in this file changes
+// without a new version byte, a new tag, and a new vector committed alongside
+// the specification — because from the first durable append onward, the bytes
+// in storage are the authority and the code is not.
 
 package domain
 
@@ -126,13 +118,13 @@ import (
 // exists so that a future format change is detectable in the bytes rather
 // than inferred from a digest that no longer matches. See this file's doc
 // comment for the version history.
-const canonicalVersion byte = 0x02
+const canonicalVersion byte = 0x01
 
 // entryDomainTag is the domain-separation string mixed into every entry
 // digest. Without it, a SHA-256 digest computed by this module over some
 // other protocol's bytes could be mistaken for an entry digest, and
 // vice versa. It changes whenever canonicalVersion does.
-const entryDomainTag = "laenenai/audit:entry:v2"
+const entryDomainTag = "audit:entry:v1"
 
 // FirstSequence is the sequence number of the first entry in every chain.
 // Numbering starts at 1 rather than 0 so that the zero Checkpoint — the
