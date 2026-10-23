@@ -1,88 +1,98 @@
 # audit
 
-An append-only hash-chained event log that can be independently verified.
+[![ci](https://github.com/laenenai/audit/actions/workflows/ci.yml/badge.svg)](https://github.com/laenenai/audit/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/laenenai/audit.svg)](https://pkg.go.dev/github.com/laenenai/audit)
 
-**Not in scope:** Event semantics. Who may read it — that is an iam permission.
+An append-only, hash-chained event log that can be independently verified —
+with append-only enforced by Postgres privileges rather than by the absence of
+an `Update` method.
 
-See [CHARTER.md](CHARTER.md) for the boundary and how it is enforced, and
-`api.txt` for the public surface.
+> **Status: pre-1.0.** The domain model, the chain, verification, an in-memory
+> adapter and a Postgres adapter with its migrations are implemented and
+> tested, the latter against a real Postgres container. Checkpoint signing and
+> publication, retention scheduling and the query API are not built yet. The
+> API may change before v1.
 
-## The two identities
+## Install
 
-This is the one thing about deploying this module that is not obvious from the
-API, so it is here rather than only in a doc comment.
+```
+go get github.com/laenenai/audit
+```
 
-Append-only is enforced by Postgres, not by Go. The port has no `Update`, no
-`Delete` and no `Truncate`, and that is necessary and nowhere near sufficient:
-a compromised application holding `DELETE` on the history table can truncate
-the log. So the audit tables are owned by a role the application is not, the
-application role holds `INSERT` and `SELECT` on the history, and `UPDATE`,
-`DELETE` and `TRUNCATE` are revoked from it. A `BEFORE UPDATE OR DELETE`
-trigger refuses a mutation that gets past the privileges anyway, as defence in
-depth rather than as the mechanism.
+Requires Go 1.25.6, and Postgres 17+ for the Postgres adapter. No cgo.
 
-That means a deployment needs **two identities**:
-
-- an **owner** role, which runs `audit.Migrate` and owns everything in schema
-  `audit`;
-- an **application** role, which inserts and reads and can do nothing else.
-  Its name is configuration, because the migration has to name it in its
-  `REVOKE`.
-
-Either keep them as two connection strings, or — the default — connect as the
-owner and name the application role in `Config.AppRole`, which the adapter
-switches into with `SET LOCAL ROLE` for every transaction it opens.
+## Example
 
 ```go
-// Deployment time, as the owner.
-if err := audit.Migrate(ctx, ownerPool, audit.MigrateConfig{AppRole: "myapp_audit"}); err != nil {
-    return err
+if err := audit.Migrate(ctx, migrationPool, audit.MigrateConfig{AppRole: "myapp"}); err != nil {
+	return err
 }
 
-// Runtime. One Log per (tenant, pool) chain.
 log, err := audit.Open(ctx, audit.Config{
-    DB:      pool,
-    Chain:   audit.ChainID{Tenant: "tenant-1", Pool: "main"},
-    AppRole: "myapp_audit",
-    // Fail to start rather than run without the guarantee.
-    RequireAppendOnlyEnforcement: true,
+	DB:    runtimePool, // the app role: INSERT and SELECT, nothing else
+	Chain: audit.ChainID{Tenant: "tenant-42", Pool: "eu-1"},
+})
+if err != nil {
+	return err
+}
+
+entry, err := log.Append(ctx, audit.Record{
+	Actor:   "principal-7",
+	Subject: audit.SubjectRef{Kind: "document", ID: "doc-9"},
+	Action:  "content.read",
+	Outcome: "allowed",
 })
 ```
 
-A deployment that declines privilege separation gets a working audit log with
-**no enforcement of append-only** beyond the Go API — which is to say, none
-against a compromised application. `Open` detects that at startup and reports
-it at error level with the specific privileges it found; set
-`RequireAppendOnlyEnforcement` to make it fatal instead, or call
-`audit.CheckEnforcement` from a health check to ask the same question.
+To make the audit row commit with the thing it records, put your transaction in
+the context — `audit.WithTx(ctx, tx)` — and the append joins it. A **denial**
+has no transaction, and is recorded standalone.
 
-## Committing an audit record with the thing it audits
+## Four things worth knowing before you rely on it
 
-```go
-// A granted operation: the audit row commits with the work, or neither does.
-tx, _ := pool.Begin(ctx)
-_, err := log.Append(audit.WithTx(ctx, tx), rec)
+**Append-only is enforced by Postgres, not by this API.** The `Log` interface
+has no `Update`, `Delete` or `Truncate` — necessary, and nowhere near
+sufficient, because a compromised application holding `DELETE` can truncate the
+log and Go has nothing to say about it. So the tables are owned by a role the
+application is not, the application role holds `INSERT` and `SELECT` and
+nothing else, and the trigger is defence in depth *behind* the privilege rather
+than the mechanism. `audit.CheckEnforcement` reports whether that separation is
+actually in effect, and `Open` says so loudly when it is not — a deployment
+running as the owner gets a working log with no enforcement, and must be told
+rather than left to assume.
 
-// A denial has no transaction — nothing happened — and must still be
-// recorded. That is an Append on a context WithTx was never called on.
-_, err = log.Append(ctx, denial)
-```
+**A hash chain cannot bear witness to its own completeness.** A prefix of a
+valid chain is a valid chain, so truncation of the tail is undetectable from
+the log alone. `VerifyOptions` therefore takes a witness or a root: everything
+at or before it is accepted on *its* authority, which means a root read back out
+of the same storage that holds the chain proves nothing. The window of
+deniability is everything since the last published checkpoint, so **checkpoint
+frequency and publication is the real security parameter** — and publishing
+them is not yet built.
 
-## Verification
+**One chain per `(tenant, pool)`, because a chain serializes writes.** Each
+entry commits to its predecessor, so an append must read the head, so appends
+to one chain cannot be concurrent. The chain is a write bottleneck and its
+granularity is the only lever. Appends to *different* chains do not serialize.
 
-`audit.Verify` walks the chain and re-derives it. Two options matter:
+**Audit records cannot be erased.** Nothing can be removed from an append-only
+chain after the fact, which makes one call-site rule load-bearing: **never put
+content in `Detail`.** If content lands there, no later erasure reaches it.
 
-- `Witness` is a checkpoint obtained earlier and kept somewhere the log's
-  operator does not control. Without one, a **truncated tail is undetectable**:
-  a prefix of a valid chain is a valid chain, and the log cannot bear witness
-  to its own completeness.
-- `Root` is where verification begins. Retention drops whole range partitions
-  at a checkpoint boundary — the only deletion a hash chain tolerates — so the
-  checkpoint becomes the chain's new verification root. Everything at or
-  before a `Root` is accepted on that root's authority, so a root is worth
-  exactly what its provenance is worth.
+## What it does not do
 
-Verifying a chain that is still being appended to should be done inside one
-snapshot, since a pass that pages across several transactions can see a head
-that is ahead of the entries it walked. Open a `REPEATABLE READ` transaction,
-put it in the context with `audit.WithTx`, and verify through that.
+Event semantics — what an action means, and which fields a given event carries
+— are the caller's. So is who may read the log: that is an authorization
+question, not this module's. Retention scheduling, checkpoint publication and
+the query API are not yet built.
+
+## Documentation
+
+- [`CHARTER.md`](CHARTER.md) — the boundary and the two mechanisms that enforce it
+- [`SECURITY.md`](SECURITY.md)
+- `docs/superpowers/specs/` — the Postgres backend's design decisions, including why the privilege grants are *reconciled on every run* rather than applied by a versioned migration
+- `api.txt` — the public surface as a golden file, diffed in CI
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).
