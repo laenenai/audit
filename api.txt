@@ -15,9 +15,23 @@ type Action = domain.Action
 
 type ActorID = domain.ActorID
 
+const BreakCheckpointMismatch = domain.BreakCheckpointMismatch
+
+const BreakDigestMismatch = domain.BreakDigestMismatch
+
+const BreakHeadMismatch = domain.BreakHeadMismatch
+
 type BreakKind = domain.BreakKind
 
+const BreakLinkMismatch = domain.BreakLinkMismatch
+
+const BreakSequenceMismatch = domain.BreakSequenceMismatch
+
+const BreakTruncated = domain.BreakTruncated
+
 type ChainError = domain.ChainError
+
+type ChainID = domain.ChainID
 
 type ChainLink = domain.ChainLink
 
@@ -43,17 +57,33 @@ type Event = domain.Event
 
 type EventID = domain.EventID
 
+const FirstSequence = domain.FirstSequence
+
 type FixedClock = domain.FixedClock
 
 type Log = eventlog.Log
 
+const MaxDetailLen = domain.MaxDetailLen
+
+type MemoryConfig = eventlog.MemoryConfig
+
+func NewMemory(cfg MemoryConfig) Log
+
 type Outcome = domain.Outcome
+
+type PoolID = domain.PoolID
 
 type Record = domain.Record
 
 type SubjectRef = domain.SubjectRef
 
 type SystemClock = domain.SystemClock
+
+type TenantID = domain.TenantID
+
+func Verify(ctx context.Context, log Log, opt VerifyOptions) (Checkpoint, error)
+
+func VerifyEntries(entries []Entry, opt VerifyOptions) (Checkpoint, error)
 
 type VerifyOptions = eventlog.VerifyOptions
 
@@ -91,6 +121,17 @@ type ChainError struct {
 func (*ChainError) Error() string
 
 func (*ChainError) Unwrap() error
+
+type ChainID struct {
+	Tenant TenantID
+	Pool PoolID
+}
+
+func (ChainID) IsZero() bool
+
+func (ChainID) String() string
+
+func (ChainID) Validate() error
 
 type ChainLink struct {
 	Prev Digest
@@ -140,6 +181,7 @@ var ErrMalformedDigest = errors.New("audit: malformed digest")
 var ErrMalformedEventID = errors.New("audit: malformed event id")
 
 type Event struct {
+	Chain ChainID
 	ID EventID
 	Sequence uint64
 	Timestamp time.Time
@@ -172,7 +214,7 @@ func NewChainError(kind BreakKind, sequence uint64) *ChainError
 
 func NewEntry(prev Digest, e Event) Entry
 
-func NewEvent(id EventID, sequence uint64, at time.Time, rec Record) Event
+func NewEvent(chain ChainID, id EventID, sequence uint64, at time.Time, rec Record) Event
 
 func NewEventID(clock Clock) (EventID, error)
 
@@ -183,6 +225,8 @@ type Outcome string
 func ParseDigest(s string) (Digest, error)
 
 func ParseEventID(s string) (EventID, error)
+
+type PoolID string
 
 type Record struct {
 	Actor ActorID
@@ -207,6 +251,8 @@ type SystemClock struct{}
 
 func (SystemClock) Now() time.Time
 
+type TenantID string
+
 package eventlog // internal/eventlog
 
 type Log interface {
@@ -216,6 +262,7 @@ type Log interface {
 }
 
 type MemoryConfig struct {
+	Chain domain.ChainID
 	Clock domain.Clock
 }
 
@@ -226,6 +273,7 @@ func Verify(ctx context.Context, log Log, opt VerifyOptions) (domain.Checkpoint,
 func VerifyEntries(entries []domain.Entry, opt VerifyOptions) (domain.Checkpoint, error)
 
 type VerifyOptions struct {
+	Root domain.Checkpoint
 	Witness domain.Checkpoint
 	PageSize int
 }

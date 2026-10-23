@@ -55,6 +55,66 @@ import (
 // mint time, so an id sorts usefully in an index and in a log line.
 type EventID string
 
+// TenantID references the tenant a chain belongs to, opaquely. Like every
+// other identifier in this module it is stored, hashed and returned, never
+// resolved or interpreted.
+type TenantID string
+
+// PoolID references the data pool a chain lives in, opaquely. A pool may be
+// a schema, a database, or an entire Postgres instance — which it is, is the
+// deployment's business and not this module's.
+type PoolID string
+
+// ChainID names one hash chain. There is exactly one chain per
+// (tenant, pool), and it is part of the envelope rather than a property of
+// a particular Log, because it is one of the fields the entry digest commits
+// to: without it, an entry lifted out of one tenant's chain and spliced into
+// another's would hash correctly in its new position.
+//
+// # Why this granularity
+//
+// A hash chain serializes writes by construction — each entry commits to its
+// predecessor, so an append must read the head, and appends to one chain
+// therefore cannot proceed concurrently. The chain is a write bottleneck and
+// its granularity is the only lever on that bottleneck.
+//
+// Tenant, because audit records are tenant-scoped and that is the
+// granularity every audit question is asked at. Pool, because pools may be
+// separate databases and a chain cannot span databases. Cross-chain ordering
+// does not exist and is not needed: two events in two tenants' chains have
+// no defined order relative to one another, and nothing in this module
+// pretends otherwise.
+type ChainID struct {
+	// Tenant is the tenant the chain belongs to. Required.
+	Tenant TenantID
+	// Pool is the data pool the chain lives in. Required.
+	Pool PoolID
+}
+
+// IsZero reports whether c names no chain.
+func (c ChainID) IsZero() bool { return c.Tenant == "" && c.Pool == "" }
+
+// String renders the chain as "<tenant>/<pool>", a form compact enough for
+// a log line or an error message. Both halves are opaque identifiers, never
+// secrets, so rendering them is safe; nothing parses this form back.
+func (c ChainID) String() string { return string(c.Tenant) + "/" + string(c.Pool) }
+
+// Validate reports whether c names a chain usable by a shared store: both
+// halves present, neither over its length bound. It returns a wrapped
+// ErrInvalidArgument.
+//
+// It validates shape, never meaning — a tenant id of "t" is as valid here as
+// a ULID, because which identifier scheme a deployment uses is not this
+// module's business. The one adapter for which the zero ChainID is
+// nonetheless acceptable is the in-memory one, which holds a single chain by
+// construction and never has to tell two apart; see NewMemory.
+func (c ChainID) Validate() error {
+	if err := validateFieldAs(ErrInvalidArgument, "chain tenant", string(c.Tenant), true); err != nil {
+		return err
+	}
+	return validateFieldAs(ErrInvalidArgument, "chain pool", string(c.Pool), true)
+}
+
 // ActorID references whoever or whatever caused an event. It is an opaque
 // identifier: this module stores it, hashes it, and returns it, and never
 // resolves, validates, or interprets it. A principal id, a service account
@@ -203,14 +263,23 @@ func (r Record) Validate() error {
 	return nil
 }
 
-// validateField checks one variable-length string field: present if
-// required, and within maxFieldLen either way.
+// validateField checks one variable-length string field of a submitted
+// record: present if required, and within maxFieldLen either way.
 func validateField(label, value string, required bool) error {
+	return validateFieldAs(ErrInvalidRecord, label, value, required)
+}
+
+// validateFieldAs is validateField with the sentinel chosen by the caller.
+// A malformed ChainID is the adapter's own wiring being wrong rather than a
+// submitted record being wrong, and a caller distinguishing "fix your call
+// site" from "fix your configuration" needs those to carry different
+// sentinels while sharing one set of length rules.
+func validateFieldAs(sentinel error, label, value string, required bool) error {
 	if required && value == "" {
-		return fmt.Errorf("%w: %s is required", ErrInvalidRecord, label)
+		return fmt.Errorf("%w: %s is required", sentinel, label)
 	}
 	if len(value) > maxFieldLen {
-		return fmt.Errorf("%w: %s is %d bytes, limit is %d", ErrInvalidRecord, label, len(value), maxFieldLen)
+		return fmt.Errorf("%w: %s is %d bytes, limit is %d", sentinel, label, len(value), maxFieldLen)
 	}
 	return nil
 }
@@ -223,6 +292,12 @@ func validateField(label, value string, required bool) error {
 // from a log is only as trustworthy as the chain it arrived in — which is
 // the point of Verify.
 type Event struct {
+	// Chain names the chain this event belongs to: one per (tenant, pool).
+	// It is assigned by the log, not submitted by the caller, for the same
+	// reason Sequence is — a caller able to choose its own chain could
+	// write a tenant's audit history into another tenant's chain. See
+	// ChainID.
+	Chain ChainID
 	// ID names this event globally and permanently.
 	ID EventID
 	// Sequence is the event's 1-based position in its chain. The first
@@ -255,15 +330,17 @@ func (e Event) Clone() Event {
 	return out
 }
 
-// NewEvent assembles the Event for rec at the given sequence and instant.
-// It is the one constructor an adapter's append path uses, so that every
-// adapter assigns the same fields the same way: the timestamp is
-// canonicalized, Detail is copied, and the id is minted fresh.
+// NewEvent assembles the Event for rec in chain at the given sequence and
+// instant. It is the one constructor an adapter's append path uses, so that
+// every adapter assigns the same fields the same way: the chain is stamped,
+// the timestamp is canonicalized, Detail is copied, and the id is minted
+// fresh.
 //
-// It does not validate rec — an adapter validates first, so that a
+// It does not validate rec or chain — an adapter validates first, so that a
 // rejected record never consumes a sequence number.
-func NewEvent(id EventID, sequence uint64, at time.Time, rec Record) Event {
+func NewEvent(chain ChainID, id EventID, sequence uint64, at time.Time, rec Record) Event {
 	return Event{
+		Chain:     chain,
 		ID:        id,
 		Sequence:  sequence,
 		Timestamp: CanonicalTime(at),

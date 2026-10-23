@@ -16,14 +16,17 @@
 // appears anywhere in this module — and it does not hold the question of
 // who may read the log, which is an iam permission.
 //
-// This file declares aliases and sentinel errors only — no behaviour, no
-// constructors. The increment that adds the Postgres adapter is also the
-// one that adds the single Open(ctx, Config) constructor and is the only
-// one allowed to add further internal imports here. Until then a log is
-// constructed inside the module and exercised through audittest.
+// This file carries the module's aliases, sentinel errors, exported
+// constants and entry points — and no logic. Every function here is a
+// one-line forward to an internal package; the reason they are here at all
+// is that a facade which hides what the module is for is not a facade, and
+// Go's internal rule makes anything not re-exported here unreachable from
+// outside the module.
 package audit
 
 import (
+	"context"
+
 	"github.com/laenen-ai/audit/internal/domain"
 	"github.com/laenen-ai/audit/internal/eventlog"
 )
@@ -33,10 +36,12 @@ type (
 	// comment also records why an append can be made to participate in a
 	// caller-supplied transaction.
 	Log = eventlog.Log
-	// VerifyOptions configures a verification pass, including the
-	// witnessed checkpoint that makes a truncated tail detectable. See
-	// eventlog.VerifyOptions.
+	// VerifyOptions configures a verification pass: the root it starts
+	// from, and the witnessed checkpoint that makes a truncated tail
+	// detectable. See eventlog.VerifyOptions.
 	VerifyOptions = eventlog.VerifyOptions
+	// MemoryConfig configures NewMemory. See eventlog.MemoryConfig.
+	MemoryConfig = eventlog.MemoryConfig
 
 	// Record is what a caller submits to a log. See domain.Record.
 	Record = domain.Record
@@ -44,6 +49,13 @@ type (
 	Event = domain.Event
 	// Entry is an Event together with its chain link. See domain.Entry.
 	Entry = domain.Entry
+
+	// ChainID names one chain: one per (tenant, pool). See domain.ChainID.
+	ChainID = domain.ChainID
+	// TenantID references the tenant a chain belongs to, opaquely. See domain.TenantID.
+	TenantID = domain.TenantID
+	// PoolID references the pool a chain lives in, opaquely. See domain.PoolID.
+	PoolID = domain.PoolID
 
 	// EventID identifies one event globally and permanently. See domain.EventID.
 	EventID = domain.EventID
@@ -94,3 +106,47 @@ var (
 	// ErrMalformedEventID is domain.ErrMalformedEventID.
 	ErrMalformedEventID = domain.ErrMalformedEventID
 )
+
+// BreakKind values: how a chain failed to verify. The set is closed; see
+// domain's BreakKind constants for what each one means and why a caller
+// should branch on ErrChainBroken rather than on these.
+const (
+	BreakSequenceMismatch   = domain.BreakSequenceMismatch
+	BreakLinkMismatch       = domain.BreakLinkMismatch
+	BreakDigestMismatch     = domain.BreakDigestMismatch
+	BreakCheckpointMismatch = domain.BreakCheckpointMismatch
+	BreakTruncated          = domain.BreakTruncated
+	BreakHeadMismatch       = domain.BreakHeadMismatch
+)
+
+const (
+	// FirstSequence is the sequence number of every chain's first entry.
+	// See domain.FirstSequence for why numbering starts at one.
+	FirstSequence = domain.FirstSequence
+	// MaxDetailLen bounds Record.Detail. See domain.MaxDetailLen.
+	MaxDetailLen = domain.MaxDetailLen
+)
+
+// Verify walks a log from its root to its end, re-deriving the hash chain,
+// and returns the head it arrived at. See eventlog.Verify, whose doc comment
+// is the contract — in particular what a verification pass can and cannot
+// prove, and why truncation of the tail needs a witness.
+func Verify(ctx context.Context, log Log, opt VerifyOptions) (Checkpoint, error) {
+	return eventlog.Verify(ctx, log, opt)
+}
+
+// VerifyEntries applies the rules Verify applies to a chain already in
+// memory — a page a caller read itself, or a chain exported to a file and
+// verified on a machine with no access to the log at all. See
+// eventlog.VerifyEntries.
+func VerifyEntries(entries []Entry, opt VerifyOptions) (Checkpoint, error) {
+	return eventlog.VerifyEntries(entries, opt)
+}
+
+// NewMemory returns an in-memory Log: the adapter a consumer runs its own
+// unit tests against, and the one audittest.RunLogSuite is demonstrated on.
+// It is not a production store — nothing in it survives the process. See
+// eventlog.NewMemory.
+func NewMemory(cfg MemoryConfig) Log {
+	return eventlog.NewMemory(cfg)
+}

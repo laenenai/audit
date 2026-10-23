@@ -27,9 +27,15 @@ import (
 // it was.
 var ErrInvalidRecord = errors.New("audit: invalid record")
 
-// ErrInvalidArgument is returned when a read argument is unusable: a
-// non-positive page size, for instance. Like ErrInvalidRecord it is a
-// precondition error and says nothing about the state of the log.
+// ErrInvalidArgument is returned when an argument or a piece of adapter
+// configuration is unusable: a non-positive page size, or a ChainID missing
+// its tenant or its pool. Like ErrInvalidRecord it is a precondition error
+// and says nothing about the state of the log.
+//
+// It is a separate sentinel from ErrInvalidRecord because the two are fixed
+// in different places: an invalid record is a bug at the call site that
+// submitted it, while an invalid chain identifier or page size is a bug in
+// how the log was wired up.
 var ErrInvalidArgument = errors.New("audit: invalid argument")
 
 // ErrChainBroken is the single sentinel every verification failure

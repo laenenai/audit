@@ -20,6 +20,7 @@ func buildChain(t *testing.T, n int) []domain.Entry {
 	t.Helper()
 
 	clock := domain.NewFixedClock(time.Date(2026, time.October, 23, 12, 0, 0, 0, time.UTC))
+	chain := domain.ChainID{Tenant: "tenant-1", Pool: "pool-1"}
 	entries := make([]domain.Entry, 0, n)
 	var prev domain.Digest
 
@@ -36,7 +37,7 @@ func buildChain(t *testing.T, n int) []domain.Entry {
 			Detail:  []byte(fmt.Sprintf(`{"n":%d}`, i)),
 		}
 		//nolint:gosec // i is a small loop counter, not an external length
-		entry := domain.NewEntry(prev, domain.NewEvent(id, uint64(i), clock.Now(), rec))
+		entry := domain.NewEntry(prev, domain.NewEvent(chain, id, uint64(i), clock.Now(), rec))
 		entries = append(entries, entry)
 		prev = entry.Link.Self
 		clock.Advance(time.Millisecond)
@@ -390,5 +391,161 @@ func TestVerifyOfAnEmptyLogIsTheZeroCheckpoint(t *testing.T) {
 	}
 	if !got.IsZero() {
 		t.Fatalf("head = %s, want the zero checkpoint", got)
+	}
+}
+
+// VerifyOptions.Root is what makes retention and tamper-evidence
+// compatible: retention drops whole partitions at a checkpoint boundary, so
+// the entries before that checkpoint are *gone* and a verifier walking from
+// the genesis would report the hole as tampering. Verifying from the
+// checkpoint instead treats it as the chain's new root.
+
+func TestVerifyEntriesFromARootAcceptsTheRemainingSuffix(t *testing.T) {
+	t.Parallel()
+
+	entries := buildChain(t, 6)
+	root := domain.Checkpoint{Sequence: entries[2].Event.Sequence, Digest: entries[2].Link.Self}
+	suffix := entries[3:]
+
+	got, err := eventlog.VerifyEntries(suffix, eventlog.VerifyOptions{Root: root})
+	if err != nil {
+		t.Fatalf("VerifyEntries from root %s: %v", root, err)
+	}
+	if want := headOf(entries); got != want {
+		t.Fatalf("head = %s, want %s", got, want)
+	}
+
+	// Without the root, the same suffix is a chain that does not start at
+	// its genesis — which is exactly the error the root exists to answer.
+	_, err = eventlog.VerifyEntries(suffix, eventlog.VerifyOptions{})
+	wantBreak(t, err, domain.BreakSequenceMismatch, domain.FirstSequence)
+}
+
+// The root is a digest, not merely a sequence number: a suffix whose first
+// entry does not actually follow the witnessed root is a spliced chain, and
+// saying "start at sequence 4" must not be enough to make it verify.
+func TestVerifyEntriesFromARootRejectsASuffixThatDoesNotFollowIt(t *testing.T) {
+	t.Parallel()
+
+	entries := buildChain(t, 6)
+	suffix := entries[3:]
+
+	t.Run("wrong_digest", func(t *testing.T) {
+		t.Parallel()
+		root := domain.Checkpoint{Sequence: 3, Digest: domain.Digest{0xaa}}
+		_, err := eventlog.VerifyEntries(suffix, eventlog.VerifyOptions{Root: root})
+		wantBreak(t, err, domain.BreakLinkMismatch, 4)
+	})
+
+	t.Run("wrong_sequence", func(t *testing.T) {
+		t.Parallel()
+		root := domain.Checkpoint{Sequence: 2, Digest: entries[2].Link.Self}
+		_, err := eventlog.VerifyEntries(suffix, eventlog.VerifyOptions{Root: root})
+		wantBreak(t, err, domain.BreakSequenceMismatch, 3)
+	})
+
+	t.Run("tampered_suffix", func(t *testing.T) {
+		t.Parallel()
+		root := domain.Checkpoint{Sequence: 3, Digest: entries[2].Link.Self}
+		tampered := make([]domain.Entry, len(suffix))
+		copy(tampered, suffix)
+		tampered[1].Event.Detail = []byte(`{"tampered":true}`)
+		_, err := eventlog.VerifyEntries(tampered, eventlog.VerifyOptions{Root: root})
+		wantBreak(t, err, domain.BreakDigestMismatch, 5)
+	})
+}
+
+// A root at the chain's own head is the degenerate case retention produces
+// when the most recent partition is the only one left and it is empty: there
+// is nothing after the root to walk, and the root itself is the head. It must
+// verify rather than being mistaken for an empty log that lost its history.
+func TestVerifyEntriesFromARootAtTheHeadIsTheRoot(t *testing.T) {
+	t.Parallel()
+
+	entries := buildChain(t, 4)
+	root := headOf(entries)
+
+	got, err := eventlog.VerifyEntries(nil, eventlog.VerifyOptions{Root: root})
+	if err != nil {
+		t.Fatalf("VerifyEntries of nothing after root %s: %v", root, err)
+	}
+	if got != root {
+		t.Fatalf("head = %s, want the root %s", got, root)
+	}
+}
+
+// Root and Witness are independent and compose: the root says where
+// verification may begin, the witness says what must still be there. A
+// witness at or after the root behaves exactly as it does from the genesis.
+func TestVerifyEntriesFromARootStillHonoursAWitness(t *testing.T) {
+	t.Parallel()
+
+	entries := buildChain(t, 6)
+	root := domain.Checkpoint{Sequence: 3, Digest: entries[2].Link.Self}
+
+	t.Run("witness_met", func(t *testing.T) {
+		t.Parallel()
+		opt := eventlog.VerifyOptions{Root: root, Witness: headOf(entries)}
+		if _, err := eventlog.VerifyEntries(entries[3:], opt); err != nil {
+			t.Fatalf("VerifyEntries: %v", err)
+		}
+	})
+
+	t.Run("witness_beyond_a_truncated_tail", func(t *testing.T) {
+		t.Parallel()
+		opt := eventlog.VerifyOptions{Root: root, Witness: headOf(entries)}
+		_, err := eventlog.VerifyEntries(entries[3:5], opt)
+		wantBreak(t, err, domain.BreakTruncated, 6)
+	})
+
+	// A witness behind the root is unverifiable by construction: the
+	// entry it names is one of the ones retention removed. Reporting it as
+	// a truncated tail is right — the chain genuinely cannot show it —
+	// and quietly accepting it would make the witness worthless.
+	t.Run("witness_behind_the_root", func(t *testing.T) {
+		t.Parallel()
+		opt := eventlog.VerifyOptions{Root: root, Witness: domain.Checkpoint{Sequence: 1, Digest: entries[0].Link.Self}}
+		_, err := eventlog.VerifyEntries(entries[3:], opt)
+		wantBreak(t, err, domain.BreakTruncated, 1)
+	})
+}
+
+func TestVerifyFromARootPagesFromTheRootRatherThanTheGenesis(t *testing.T) {
+	t.Parallel()
+
+	entries := buildChain(t, 10)
+	root := domain.Checkpoint{Sequence: 4, Digest: entries[3].Link.Self}
+	want := headOf(entries)
+
+	// The log holds only what survived the partition drop.
+	for _, pageSize := range []int{1, 2, 6, 100} {
+		t.Run(fmt.Sprintf("pageSize=%d", pageSize), func(t *testing.T) {
+			t.Parallel()
+
+			log := &stubLog{entries: entries[4:], head: want}
+			got, err := eventlog.Verify(context.Background(), log, eventlog.VerifyOptions{Root: root, PageSize: pageSize})
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if got != want {
+				t.Fatalf("head = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestVerifyFromARootAtTheHeadAgreesWithTheLogsHead(t *testing.T) {
+	t.Parallel()
+
+	entries := buildChain(t, 4)
+	root := headOf(entries)
+
+	log := &stubLog{head: root}
+	got, err := eventlog.Verify(context.Background(), log, eventlog.VerifyOptions{Root: root})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got != root {
+		t.Fatalf("head = %s, want the root %s", got, root)
 	}
 }

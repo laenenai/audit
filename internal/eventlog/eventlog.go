@@ -139,9 +139,38 @@ type Log interface {
 }
 
 // VerifyOptions configures a verification pass. The zero value is valid
-// and means "verify the chain's internal consistency, with no external
-// witness and the default page size".
+// and means "verify the chain's whole internal consistency from its genesis
+// entry, with no external witness and the default page size".
 type VerifyOptions struct {
+	// Root is where verification begins: the chain is walked from the
+	// entry after Root, and that entry's Prev must be Root's digest. The
+	// zero Checkpoint means "from the genesis entry", which is the only
+	// correct default for a chain that has never been truncated.
+	//
+	// It exists because retention and tamper-evidence are only compatible
+	// through checkpoints. You cannot delete from a hash chain without
+	// breaking verification from the genesis, so retention drops whole
+	// partitions at a checkpoint boundary and the checkpoint becomes the
+	// chain's new verification root: the entries before it are genuinely
+	// gone, and a verifier walking from sequence one would report the hole
+	// as tampering rather than as the retention it is.
+	//
+	// What a root costs, and it is not free: everything at or before Root
+	// is accepted on Root's authority alone. A Root a caller invented, or
+	// read back out of the same storage that holds the chain, proves
+	// nothing — it would let whoever controls the storage declare any
+	// prefix to be history. A root is only worth what its provenance is
+	// worth, which is why a published, signed checkpoint stops being a
+	// security nicety and becomes a functional prerequisite for retention.
+	// This module does not yet publish one; until it does, a Root must come
+	// from somewhere the log's operator does not control.
+	//
+	// Root and Witness are independent and compose. Root says where the
+	// verifier may begin; Witness says what must still be present. A
+	// Witness behind Root names an entry retention removed, so it reports
+	// BreakTruncated — the chain genuinely cannot show it.
+	Root domain.Checkpoint
+
 	// Witness is a checkpoint the caller previously obtained from this
 	// chain and has reason to trust — because it was recorded elsewhere,
 	// published, countersigned, or simply kept by a party that does not
@@ -239,14 +268,24 @@ type VerifyOptions struct {
 //
 // A caller obtains a witness from Head or from a previous Verify, and the
 // value of one is entirely in where it is kept.
+//
+// # Verifying a chain that retention has truncated from the front
+//
+// A chain whose oldest entries have been dropped on purpose — retention
+// drops whole partitions at a checkpoint boundary — no longer starts at its
+// genesis, and verifying it from sequence one reports the missing prefix as
+// tampering. VerifyOptions.Root is how a caller says "this checkpoint is
+// where this chain now begins"; see its documentation for what that costs,
+// which is that everything at or before the root is taken on the root's
+// authority and a root is therefore only worth its provenance.
 func Verify(ctx context.Context, log Log, opt VerifyOptions) (domain.Checkpoint, error) {
 	pageSize := opt.PageSize
 	if pageSize <= 0 {
 		pageSize = defaultPageSize
 	}
 
-	w := newWalker(opt.Witness)
-	for from := domain.FirstSequence; ; {
+	w := newWalker(opt.Root, opt.Witness)
+	for from := w.want; ; {
 		page, err := log.Entries(ctx, from, pageSize)
 		if err != nil {
 			return domain.Checkpoint{}, fmt.Errorf("audit: verify: read entries from sequence %d: %w", from, err)
@@ -289,7 +328,7 @@ func Verify(ctx context.Context, log Log, opt VerifyOptions) (domain.Checkpoint,
 // It performs no head-agreement check, there being no log to ask. Verify's
 // doc comment is the contract; this is the same walk without the I/O.
 func VerifyEntries(entries []domain.Entry, opt VerifyOptions) (domain.Checkpoint, error) {
-	w := newWalker(opt.Witness)
+	w := newWalker(opt.Root, opt.Witness)
 	for _, entry := range entries {
 		if err := w.push(entry); err != nil {
 			return domain.Checkpoint{}, err
@@ -311,8 +350,24 @@ type walker struct {
 	head domain.Checkpoint
 }
 
-func newWalker(witness domain.Checkpoint) *walker {
-	return &walker{witness: witness, want: domain.FirstSequence}
+// newWalker starts a walk after root — which is the zero Checkpoint for an
+// untruncated chain, and then prev is the genesis entry's zero predecessor
+// and want is domain.FirstSequence, exactly as before roots existed.
+//
+// head starts at root rather than at the zero Checkpoint so that walking no
+// entries at all from a non-zero root reports the root as the head: a chain
+// whose entire surviving tail is empty is at its root, not empty.
+func newWalker(root, witness domain.Checkpoint) *walker {
+	want := domain.FirstSequence
+	if !root.IsZero() {
+		want = root.Sequence + 1
+	}
+	return &walker{
+		witness: witness,
+		prev:    root.Digest,
+		want:    want,
+		head:    root,
+	}
 }
 
 // push verifies one entry as the successor of everything pushed so far.

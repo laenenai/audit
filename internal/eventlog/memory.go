@@ -27,6 +27,7 @@ import (
 // a domain.FixedClock, which is not itself safe for concurrent use, to a
 // log under concurrent appends.
 type memoryLog struct {
+	chain domain.ChainID
 	clock domain.Clock
 
 	mu      sync.Mutex
@@ -38,6 +39,15 @@ var _ Log = (*memoryLog)(nil)
 
 // MemoryConfig configures NewMemory. The zero value is valid.
 type MemoryConfig struct {
+	// Chain is the chain identifier stamped on every entry this log
+	// appends, and therefore committed to by every entry's digest. The
+	// zero ChainID is permitted here and means "the unnamed chain": this
+	// adapter holds exactly one chain in one process and never has to tell
+	// two apart, so unlike a shared store it has nothing to get wrong by
+	// leaving it unset. A test that cares what the chain identifier does to
+	// a digest sets it.
+	Chain domain.ChainID
+
 	// Clock supplies the instant each appended entry records. Nil means
 	// domain.SystemClock. A domain.FixedClock is safe here even under
 	// concurrent appends — see memoryLog.
@@ -46,13 +56,14 @@ type MemoryConfig struct {
 
 // NewMemory returns an in-memory Log. It cannot fail, so it returns no
 // error: there is no resource to acquire and nothing in MemoryConfig that
-// can be invalid.
+// can be invalid — including Chain, whose zero value this adapter
+// deliberately accepts (see MemoryConfig.Chain).
 func NewMemory(cfg MemoryConfig) Log {
 	clock := cfg.Clock
 	if clock == nil {
 		clock = domain.SystemClock{}
 	}
-	return &memoryLog{clock: clock}
+	return &memoryLog{chain: cfg.Chain, clock: clock}
 }
 
 // Append implements Log.
@@ -75,7 +86,7 @@ func (l *memoryLog) Append(ctx context.Context, rec domain.Record) (domain.Entry
 	}
 
 	sequence := l.head.Sequence + 1
-	entry := domain.NewEntry(l.head.Digest, domain.NewEvent(id, sequence, l.clock.Now(), rec))
+	entry := domain.NewEntry(l.head.Digest, domain.NewEvent(l.chain, id, sequence, l.clock.Now(), rec))
 
 	l.entries = append(l.entries, entry)
 	l.head = domain.Checkpoint{Sequence: entry.Event.Sequence, Digest: entry.Link.Self}

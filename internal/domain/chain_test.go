@@ -6,11 +6,37 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/laenen-ai/audit/internal/domain"
 )
+
+// writer is the shared primitive the two reference encoders below are
+// written in: an 8-byte big-endian length prefix followed by the bytes, the
+// framing chain.go's doc comment specifies for every variable-length field.
+type writer struct{ b bytes.Buffer }
+
+func (w *writer) lenPrefixed(s []byte) {
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+	w.b.Write(n[:])
+	w.b.Write(s)
+}
+
+func (w *writer) u64(v uint64) {
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], v)
+	w.b.Write(n[:])
+}
+
+func (w *writer) timestamp(t time.Time) {
+	w.u64(uint64(t.Unix())) //nolint:gosec // two's-complement reinterpretation, by spec
+	var nanos [4]byte
+	binary.BigEndian.PutUint32(nanos[:], uint32(t.Nanosecond())) //nolint:gosec // 0..1e9-1
+	w.b.Write(nanos[:])
+}
 
 // referenceEncode is a deliberately independent, hand-written implementation
 // of the canonical encoding documented in chain.go. It exists so the digest
@@ -19,50 +45,74 @@ import (
 // notices. Keep it in step with chain.go's doc comment, not with chain.go's
 // code.
 func referenceEncode(e domain.Event) []byte {
-	var b bytes.Buffer
+	var w writer
 
-	b.WriteByte(1) // format version
+	w.b.WriteByte(2) // format version
 
-	writeLenPrefixed := func(s []byte) {
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
-		b.Write(n[:])
-		b.Write(s)
-	}
-	writeU64 := func(v uint64) {
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], v)
-		b.Write(n[:])
-	}
+	w.lenPrefixed([]byte(e.Chain.Tenant))
+	w.lenPrefixed([]byte(e.Chain.Pool))
+	w.lenPrefixed([]byte(e.ID))
+	w.u64(e.Sequence)
+	w.timestamp(e.Timestamp)
+	w.lenPrefixed([]byte(e.Actor))
+	w.lenPrefixed([]byte(e.Subject.Kind))
+	w.lenPrefixed([]byte(e.Subject.ID))
+	w.lenPrefixed([]byte(e.Action))
+	w.lenPrefixed([]byte(e.Outcome))
+	w.lenPrefixed(e.Detail)
 
-	writeLenPrefixed([]byte(e.ID))
-	writeU64(e.Sequence)
-	writeU64(uint64(e.Timestamp.Unix())) //nolint:gosec // two's-complement reinterpretation, by spec
-	var nanos [4]byte
-	binary.BigEndian.PutUint32(nanos[:], uint32(e.Timestamp.Nanosecond())) //nolint:gosec // 0..1e9-1
-	b.Write(nanos[:])
-	writeLenPrefixed([]byte(e.Actor))
-	writeLenPrefixed([]byte(e.Subject.Kind))
-	writeLenPrefixed([]byte(e.Subject.ID))
-	writeLenPrefixed([]byte(e.Action))
-	writeLenPrefixed([]byte(e.Outcome))
-	writeLenPrefixed(e.Detail)
+	return w.b.Bytes()
+}
 
-	return b.Bytes()
+// referenceEncodeV1 is the *frozen* version 1 encoding: the format before
+// the envelope gained a chain identifier. It is kept, unchanged and never
+// to be changed, for exactly one purpose — so that
+// TestEntryDigestGoldenVectorV1 can still produce version 1's recorded
+// vector and TestEntryDigestFormatVersionBumpIsVisible can show that the
+// current encoder no longer produces it. Nothing in the module calls it,
+// and no chain was ever persisted with it (version 1 shipped with an
+// in-memory adapter only), so it is a record of a format change rather
+// than a compatibility path.
+func referenceEncodeV1(e domain.Event) []byte {
+	var w writer
+
+	w.b.WriteByte(1) // format version
+
+	w.lenPrefixed([]byte(e.ID))
+	w.u64(e.Sequence)
+	w.timestamp(e.Timestamp)
+	w.lenPrefixed([]byte(e.Actor))
+	w.lenPrefixed([]byte(e.Subject.Kind))
+	w.lenPrefixed([]byte(e.Subject.ID))
+	w.lenPrefixed([]byte(e.Action))
+	w.lenPrefixed([]byte(e.Outcome))
+	w.lenPrefixed(e.Detail)
+
+	return w.b.Bytes()
 }
 
 // referenceDigest recomputes an entry digest the way chain.go's doc comment
 // describes it, independently of chain.go's code.
 func referenceDigest(prev domain.Digest, e domain.Event) domain.Digest {
-	const tag = "laenen-ai/audit:entry:v1"
+	return taggedDigest("laenen-ai/audit:entry:v2", prev, referenceEncode(e))
+}
 
+// referenceDigestV1 is the frozen version 1 digest, with version 1's
+// domain-separation tag. See referenceEncodeV1.
+func referenceDigestV1(prev domain.Digest, e domain.Event) domain.Digest {
+	return taggedDigest("laenen-ai/audit:entry:v1", prev, referenceEncodeV1(e))
+}
+
+// taggedDigest is SHA-256( len(tag) || tag || prev || canonical ), the
+// construction chain.go's EntryDigest doc comment specifies.
+func taggedDigest(tag string, prev domain.Digest, canonical []byte) domain.Digest {
 	h := sha256.New()
 	var n [8]byte
 	binary.BigEndian.PutUint64(n[:], uint64(len(tag)))
 	h.Write(n[:])
 	h.Write([]byte(tag))
 	h.Write(prev[:])
-	h.Write(referenceEncode(e))
+	h.Write(canonical)
 
 	var out domain.Digest
 	copy(out[:], h.Sum(nil))
@@ -71,6 +121,7 @@ func referenceDigest(prev domain.Digest, e domain.Event) domain.Digest {
 
 func testEvent() domain.Event {
 	return domain.Event{
+		Chain:     domain.ChainID{Tenant: "tenant-01HQ", Pool: "pool-main"},
 		ID:        domain.EventID("0193a1b2c3d4e5f60718293a4b5c6d7e"),
 		Sequence:  7,
 		Timestamp: time.Date(2026, time.October, 23, 11, 22, 33, 123456000, time.UTC),
@@ -80,6 +131,15 @@ func testEvent() domain.Event {
 		Outcome:   domain.Outcome("allowed"),
 		Detail:    []byte(`{"bytes":4096}`),
 	}
+}
+
+// testEventV1 is testEvent with no chain identifier: the shape an Event had
+// under format version 1, which is what version 1's recorded golden vector
+// was computed over.
+func testEventV1() domain.Event {
+	e := testEvent()
+	e.Chain = domain.ChainID{}
+	return e
 }
 
 func TestEntryDigestMatchesDocumentedCanonicalEncoding(t *testing.T) {
@@ -95,21 +155,141 @@ func TestEntryDigestMatchesDocumentedCanonicalEncoding(t *testing.T) {
 	}
 }
 
-// TestEntryDigestGoldenVector pins the wire format. The vector was produced
-// by the independent reference encoder above, not copied out of the
+// goldenV1 is format version 1's recorded vector: the digest of testEventV1
+// under the zero predecessor, as version 1 computed it. It is frozen
+// history. referenceEncodeV1 still produces it, which is what makes the
+// version bump below demonstrable rather than asserted.
+const goldenV1 = "aa02bce01ee568a16d1c0ab117857f4a25fb8de333b8f79bd1248696b0901204"
+
+// goldenV2 is format version 2's recorded vector: the same fields plus the
+// chain identifier the envelope gained, under version 2's own domain tag.
+const goldenV2 = "fa2aa0fdea0687ef91eee874a6307eceaa1aedd072eb560b5dbbede101be0728"
+
+// TestEntryDigestGoldenVectorV2 pins the current wire format. The vector was
+// produced by the independent reference encoder above, not copied out of the
 // production encoder's output, so a change to chain.go that silently alters
 // the canonical form fails here — which matters because the format is a
-// persistence format: every previously written chain was hashed with it.
-func TestEntryDigestGoldenVector(t *testing.T) {
+// persistence format: every chain ever written was hashed with it.
+func TestEntryDigestGoldenVectorV2(t *testing.T) {
 	t.Parallel()
 
-	const want = "aa02bce01ee568a16d1c0ab117857f4a25fb8de333b8f79bd1248696b0901204"
-
-	got := domain.EntryDigest(domain.Digest{}, testEvent()).String()
-	if got != want {
+	if got := referenceDigest(domain.Digest{}, testEvent()).String(); got != goldenV2 {
+		t.Fatalf("the independent reference encoder gives %s, want the recorded vector %s", got, goldenV2)
+	}
+	if got := domain.EntryDigest(domain.Digest{}, testEvent()).String(); got != goldenV2 {
 		t.Fatalf("golden entry digest = %s, want %s\n"+
 			"a deliberate format change must bump the version byte and the domain tag, "+
-			"and must be stated in chain.go's doc comment", got, want)
+			"and must be stated in chain.go's doc comment", got, goldenV2)
+	}
+}
+
+// TestEntryDigestGoldenVectorV1 keeps format version 1's vector reproducible
+// from the frozen version 1 reference encoder. It is not a compatibility
+// path — nothing durable was ever written under version 1 — it is the record
+// that lets the next format change be audited the same way this one is.
+func TestEntryDigestGoldenVectorV1(t *testing.T) {
+	t.Parallel()
+
+	if got := referenceDigestV1(domain.Digest{}, testEventV1()).String(); got != goldenV1 {
+		t.Fatalf("the frozen version 1 encoder gives %s, want version 1's recorded vector %s\n"+
+			"referenceEncodeV1 is history and must not be edited", got, goldenV1)
+	}
+}
+
+// TestEntryDigestFormatVersionBumpIsVisible is the guard the notes ask for:
+// adding the chain identifier changed the encoding, so the current encoder
+// must *not* reproduce version 1's vector, and the two versions must differ
+// even for an event with no chain identifier at all — because the version
+// byte and the domain tag both changed, not only the field list.
+func TestEntryDigestFormatVersionBumpIsVisible(t *testing.T) {
+	t.Parallel()
+
+	if got := domain.EntryDigest(domain.Digest{}, testEventV1()).String(); got == goldenV1 {
+		t.Fatal("the current encoder still produces version 1's vector: the format changed without bumping the version byte and the domain tag")
+	}
+	if referenceDigest(domain.Digest{}, testEventV1()) == referenceDigestV1(domain.Digest{}, testEventV1()) {
+		t.Fatal("version 1 and version 2 hash an unchained event identically: the version byte or the domain tag is not mixed in")
+	}
+}
+
+// The chain identifier is the field version 2 exists for, so it gets its own
+// assertion rather than only a row in TestEntryDigestCoversEveryField: two
+// chains must never produce the same digest for the same event, or an entry
+// could be moved from one tenant's chain into another's undetected.
+func TestEntryDigestCommitsToTheChainIdentifier(t *testing.T) {
+	t.Parallel()
+
+	base := testEvent()
+	variants := map[string]domain.ChainID{
+		"other_tenant":   {Tenant: "tenant-other", Pool: base.Chain.Pool},
+		"other_pool":     {Tenant: base.Chain.Tenant, Pool: "pool-other"},
+		"no_chain":       {},
+		"swapped_halves": {Tenant: domain.TenantID(base.Chain.Pool), Pool: domain.PoolID(base.Chain.Tenant)},
+	}
+
+	want := domain.EntryDigest(domain.Digest{}, base)
+	for name, chain := range variants {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := base.Clone()
+			e.Chain = chain
+			if domain.EntryDigest(domain.Digest{}, e) == want {
+				t.Fatalf("an event on chain %s hashes the same as one on chain %s", chain, base.Chain)
+			}
+		})
+	}
+}
+
+func TestChainIDValidate(t *testing.T) {
+	t.Parallel()
+
+	long := domain.ChainID{Tenant: domain.TenantID(strings.Repeat("t", 257)), Pool: "p"}
+	invalid := map[string]domain.ChainID{
+		"empty":           {},
+		"no_tenant":       {Pool: "p"},
+		"no_pool":         {Tenant: "t"},
+		"tenant_too_long": long,
+		"pool_too_long":   {Tenant: "t", Pool: domain.PoolID(strings.Repeat("p", 257))},
+	}
+	for name, chain := range invalid {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if err := chain.Validate(); !errors.Is(err, domain.ErrInvalidArgument) {
+				t.Fatalf("ChainID.Validate() error = %v, want ErrInvalidArgument", err)
+			}
+		})
+	}
+
+	valid := domain.ChainID{Tenant: "tenant-1", Pool: "pool-1"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("ChainID.Validate() of %s: %v", valid, err)
+	}
+	if valid.IsZero() {
+		t.Fatalf("%s reports IsZero", valid)
+	}
+	if !(domain.ChainID{}).IsZero() {
+		t.Fatal("the zero ChainID does not report IsZero")
+	}
+	if got, want := valid.String(), "tenant-1/pool-1"; got != want {
+		t.Fatalf("ChainID.String() = %q, want %q", got, want)
+	}
+}
+
+// A chain identifier is opaque, exactly like an actor id or an action: this
+// module stores it, hashes it, and returns it. A Validate that rejected
+// anything but a particular id shape would be owning identity semantics,
+// which the charter places outside this module.
+func TestChainIDIsOpaque(t *testing.T) {
+	t.Parallel()
+
+	for _, chain := range []domain.ChainID{
+		{Tenant: "01HQ3M4Z8R7K2V9X0Y1A2B3C4D", Pool: "default"},
+		{Tenant: "acme.example.com", Pool: "eu-west-1/shard-3"},
+		{Tenant: "t", Pool: "p"},
+	} {
+		if err := chain.Validate(); err != nil {
+			t.Fatalf("ChainID.Validate() of %s: %v", chain, err)
+		}
 	}
 }
 

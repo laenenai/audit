@@ -19,18 +19,27 @@
 // canonical encoding of an Event is the concatenation, with no separators
 // and no padding:
 //
-//	 1. canonicalVersion            1 byte, currently 0x01
-//	 2. ID                          8-byte big-endian length, then that many bytes
-//	 3. Sequence                    8 bytes, big-endian unsigned
-//	 4. Timestamp seconds           8 bytes, big-endian two's-complement
+//	 1. canonicalVersion            1 byte, currently 0x02
+//	 2. Chain.Tenant                8-byte big-endian length, then that many bytes
+//	 3. Chain.Pool                  8-byte length, then bytes
+//	 4. ID                          8-byte length, then bytes
+//	 5. Sequence                    8 bytes, big-endian unsigned
+//	 6. Timestamp seconds           8 bytes, big-endian two's-complement
 //	                                (time.Time.Unix(), so pre-1970 is negative)
-//	 5. Timestamp nanoseconds       4 bytes, big-endian unsigned, 0..999_999_999
-//	 6. Actor                       8-byte length, then bytes
-//	 7. Subject.Kind                8-byte length, then bytes
-//	 8. Subject.ID                  8-byte length, then bytes
-//	 9. Action                      8-byte length, then bytes
-//	10. Outcome                     8-byte length, then bytes
-//	11. Detail                      8-byte length, then bytes
+//	 7. Timestamp nanoseconds       4 bytes, big-endian unsigned, 0..999_999_999
+//	 8. Actor                       8-byte length, then bytes
+//	 9. Subject.Kind                8-byte length, then bytes
+//	10. Subject.ID                  8-byte length, then bytes
+//	11. Action                      8-byte length, then bytes
+//	12. Outcome                     8-byte length, then bytes
+//	13. Detail                      8-byte length, then bytes
+//
+// The chain identifier comes first, immediately after the version byte,
+// because it is the chain's own identity: an entry's digest commits to which
+// chain it belongs to before it commits to anything about the event. Without
+// that, an entry could be lifted out of one tenant's chain and spliced into
+// another's at the same sequence and still hash correctly — the digest would
+// have no way to notice, because nothing in it named the chain.
 //
 // Every variable-length field is length-prefixed, which is what makes the
 // encoding injective: the decoder (which this module does not need, but
@@ -49,14 +58,33 @@
 // reading, so the digest depends on the instant and nothing else — see
 // TestEntryDigestIgnoresLocationAndMonotonicReading.
 //
-// # Changing the format
+// # Changing the format, and the one time it has changed
 //
 // The encoding is a persistence format: every chain ever written was
 // hashed with it, and re-hashing them with a different one would report
 // every historical entry as tampered. A change therefore requires a new
-// canonicalVersion byte *and* a new entryDomainTag, and a verifier that
-// dispatches on the version byte of the entry it is checking. Nothing in
-// this increment does that, because there is only one version.
+// canonicalVersion byte *and* a new entryDomainTag, and — once a deployment
+// holds entries written under more than one version — a verifier that
+// dispatches on the version byte of the entry it is checking.
+//
+// Version history:
+//
+//   - **0x01**, tag "laenen-ai/audit:entry:v1". Fields 4 onwards of the list
+//     above, with no chain identifier: the first increment treated one Log as
+//     one chain, so there was nothing to name. Its recorded test vector is
+//     kept, still reproducible from a frozen reference encoder, in
+//     TestEntryDigestGoldenVectorV1.
+//   - **0x02**, tag "laenen-ai/audit:entry:v2", current. Adds Chain.Tenant and
+//     Chain.Pool immediately after the version byte, because a shared store
+//     holds many chains and an entry that does not commit to its own chain can
+//     be moved between them.
+//
+// There is deliberately no version-1 *decoder* and no dual-version verifier.
+// Version 1 shipped with an in-memory adapter only — nothing durable was ever
+// written under it, so there is no historical chain in the world to keep
+// verifiable, and a compatibility path with no data behind it is a liability
+// rather than a kindness. The frozen version 1 encoder in the tests exists to
+// prove the version actually changed, not to read anything.
 
 package domain
 
@@ -71,14 +99,15 @@ import (
 
 // canonicalVersion is the leading byte of every canonical encoding. It
 // exists so that a future format change is detectable in the bytes rather
-// than inferred from a digest that no longer matches.
-const canonicalVersion byte = 0x01
+// than inferred from a digest that no longer matches. See this file's doc
+// comment for the version history.
+const canonicalVersion byte = 0x02
 
 // entryDomainTag is the domain-separation string mixed into every entry
 // digest. Without it, a SHA-256 digest computed by this module over some
 // other protocol's bytes could be mistaken for an entry digest, and
 // vice versa. It changes whenever canonicalVersion does.
-const entryDomainTag = "laenen-ai/audit:entry:v1"
+const entryDomainTag = "laenen-ai/audit:entry:v2"
 
 // FirstSequence is the sequence number of the first entry in every chain.
 // Numbering starts at 1 rather than 0 so that the zero Checkpoint — the
@@ -212,6 +241,8 @@ func EntryDigest(prev Digest, e Event) Digest {
 // canonicalVersion.
 func appendCanonical(dst []byte, e Event) []byte {
 	dst = append(dst, canonicalVersion)
+	dst = appendLenPrefixed(dst, []byte(e.Chain.Tenant))
+	dst = appendLenPrefixed(dst, []byte(e.Chain.Pool))
 	dst = appendLenPrefixed(dst, []byte(e.ID))
 	dst = binary.BigEndian.AppendUint64(dst, e.Sequence)
 	dst = appendInt64(dst, e.Timestamp.Unix())
