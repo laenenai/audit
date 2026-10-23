@@ -3,16 +3,24 @@
 # Derived from cas/mise.toml but deliberately NOT a copy: cas's migrate, dev,
 # up, down, reset, db and observability tasks reference ./cmd/casd and
 # deploy/compose/, neither of which exists in a library module, and its
-# `generate` task runs sqlc and buf against nothing. A task list with dangling
-# entries trains people to ignore task lists.
+# `generate` task also runs buf, which this module has no protobuf for. A task
+# list with dangling entries trains people to ignore task lists.
 #
 # A module that later grows migrations or generated code adds the task it
-# actually needs, with the same name and meaning cas uses.
+# actually needs, with the same name and meaning cas uses — which is what
+# `generate` is now: this module has sqlc queries, so it runs sqlc, and only
+# sqlc.
 
 [tools]
 go            = "1.25.6"
 golangci-lint = "2.11.4"
 gofumpt       = "0.9.2"
+# sqlc is pinned because the generated code is committed and its header
+# records the version that wrote it: an unpinned generator makes every
+# developer's `generate` a diff. cas is on 1.31.1; this module is on the
+# version that generated what is in internal/pglog/gen, and the two converge
+# the next time either is bumped deliberately.
+sqlc          = "1.30.0"
 
 [env]
 CGO_ENABLED = "0"
@@ -42,6 +50,14 @@ description = "Full suite including container- and database-backed tests."
 # the `build` task, which `check` also depends on.
 env = { CGO_ENABLED = "1" }
 run = "go test ./... -race"
+
+[tasks.generate]
+description = "Regenerate internal/pglog/gen from db/queries against db/migrations."
+# Plain `sqlc generate`, not a form guarded on sqlc.yaml existing: the module
+# has one now, the generated code is committed and part of the build, and a
+# trailing `|| echo` would turn a generation failure into a task that
+# succeeded while printing a message nobody reads.
+run = "sqlc generate"
 
 [tasks.api]
 description = "Regenerate api.txt, the public-surface golden file the charter requires."

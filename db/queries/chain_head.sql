@@ -1,0 +1,87 @@
+-- Queries against audit.chain_head: the single writable surface in this
+-- schema, one row per (tenant_id, pool_id) chain, carrying only the latest
+-- sequence and digest.
+--
+-- The head row is what makes a chain a chain under concurrency, so three of
+-- the four statements below are not independent: CreateChainHeadIfAbsent and
+-- LockChainHead are two halves of one operation, and MoveChainHead is only
+-- correct when it runs in the same transaction as the lock. See
+-- internal/pglog's appendIn, which is the only caller of all three.
+
+-- CreateChainHeadIfAbsent creates the chain's head row if this is the
+-- chain's first append.
+--
+-- It exists as a separate statement from LockChainHead because a chain's
+-- first append has no row to lock. INSERT ... ON CONFLICT DO NOTHING is the
+-- race-safe half: a concurrent identical insert makes this one wait for that
+-- transaction and then insert nothing, and if that transaction aborted
+-- instead, Postgres retries the insertion rather than reporting a conflict
+-- with a row that no longer exists. The SELECT ... FOR UPDATE that follows is
+-- what every subsequent appender on this chain serializes on.
+--
+-- The digest is a parameter rather than a default because the column requires
+-- exactly 32 bytes, so "no predecessor" is stored as the zero digest rather
+-- than left null: a nullable digest would make every read of it a special
+-- case, and the zero digest is already the reserved value the chain uses for
+-- that exact meaning. Sequence 0 means the chain exists and is empty, which
+-- the adapter's checkpointFrom maps back to the zero Checkpoint.
+--
+-- name: CreateChainHeadIfAbsent :exec
+INSERT INTO audit.chain_head (tenant_id, pool_id, sequence, digest, updated_at)
+VALUES (@tenant_id, @pool_id, 0, @digest, now())
+ON CONFLICT (tenant_id, pool_id) DO NOTHING;
+
+-- LockChainHead takes the chain's head row FOR UPDATE and returns the
+-- checkpoint it names.
+--
+-- The lock is what makes the chain a chain under concurrency. Two appenders
+-- that both observed head N would both produce an entry claiming sequence
+-- N+1 with predecessor N, and one of them would have to be thrown away.
+-- Locking the head row means the second appender waits and then observes
+-- N+1, so the chain comes out contiguous and correctly linked with no retry
+-- loop anywhere. An append to a different chain locks a different row and is
+-- not delayed at all.
+--
+-- name: LockChainHead :one
+SELECT sequence, digest
+FROM audit.chain_head
+WHERE tenant_id = @tenant_id AND pool_id = @pool_id
+FOR UPDATE;
+
+-- ChainHead reads the chain's head without locking it: the Head method.
+--
+-- No row means the chain has never been appended to. That is the zero
+-- Checkpoint, which is what an empty log reports, and not an error — a log
+-- nobody has written to yet is an ordinary state, so the adapter maps
+-- pgx.ErrNoRows onto it rather than onto a storage failure.
+--
+-- name: ChainHead :one
+SELECT sequence, digest
+FROM audit.chain_head
+WHERE tenant_id = @tenant_id AND pool_id = @pool_id;
+
+-- MoveChainHead advances the head row to the entry just written, and reports
+-- how many rows it moved.
+--
+-- The WHERE clause names the sequence the head was expected to be at, so
+-- this is an optimistic check on top of the pessimistic row lock
+-- LockChainHead took. The lock already makes a lost update impossible; the
+-- predicate is what turns a future bug that drops the lock into a failed
+-- append instead of a silently forked chain, and it costs nothing — the row
+-- is already locked and in cache. A caller that is told zero rows moved must
+-- fail the append.
+--
+-- The new sequence appears twice, which is why this one statement uses
+-- sqlc.arg() rather than the @name shorthand the rest of this file uses:
+-- sqlc v1.30.0 collapses repeated sqlc.arg() references to one parameter and
+-- does not collapse repeated @name ones, which would generate a struct with
+-- two fields of the same name. Writing the predicate as a derived expression
+-- keeps the "it was not at N-1" reasoning in the SQL, where it is reviewed,
+-- rather than moving the arithmetic into Go.
+--
+-- name: MoveChainHead :execrows
+UPDATE audit.chain_head
+SET sequence = sqlc.arg(sequence), digest = sqlc.arg(digest), updated_at = now()
+WHERE tenant_id = sqlc.arg(tenant_id)
+  AND pool_id = sqlc.arg(pool_id)
+  AND sequence = sqlc.arg(sequence) - 1;

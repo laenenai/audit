@@ -1,0 +1,82 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/pglog/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        overrides:
+          # Every id column in this schema maps to its internal/domain typed
+          # id, never a bare string: that is the whole point of the typed ids
+          # (they cannot be crossed at a call site), and a generated layer
+          # handing back string would undo it right at the boundary. This is
+          # cas/sqlc.yaml's pattern, applied to this module's two tables.
+          #
+          # The columns deliberately NOT overridden, and why, because the
+          # omissions are decisions rather than oversights:
+          #
+          #   - subject_kind and subject_id are two text columns that together
+          #     make one domain.SubjectRef. A struct spanning two columns is
+          #     not expressible as a column override, so the adapter assembles
+          #     it — one composition per row, in scanEntry's successor.
+          #   - detail is opaque bytes by charter: this module never parses it,
+          #     so []byte is already the domain type.
+          #   - link_prev, link_self and chain_head.digest are domain.Digest,
+          #     which is [32]byte. An override to it would compile and then
+          #     fail at run time, because pgx has no scan plan from bytea into
+          #     a fixed-size array — and the only way to give it one is a
+          #     sql.Scanner/driver.Valuer pair on Digest, which CONVENTIONS.md
+          #     forbids on a security-relevant type: those methods are
+          #     exported, so any package could then construct a Digest from
+          #     arbitrary bytes. So the column maps to its primitive, []byte,
+          #     and the adapter converts through domain's validating parser
+          #     (digestFrom), which rejects a wrong length rather than
+          #     truncating. One conversion per field, invariant untouched.
+          - column: "audit.event.tenant_id"
+            go_type:
+              import: "github.com/laenen-ai/audit/internal/domain"
+              type: "TenantID"
+          - column: "audit.event.pool_id"
+            go_type:
+              import: "github.com/laenen-ai/audit/internal/domain"
+              type: "PoolID"
+          - column: "audit.event.event_id"
+            go_type:
+              import: "github.com/laenen-ai/audit/internal/domain"
+              type: "EventID"
+          - column: "audit.event.actor_id"
+            go_type:
+              import: "github.com/laenen-ai/audit/internal/domain"
+              type: "ActorID"
+          - column: "audit.event.action"
+            go_type:
+              import: "github.com/laenen-ai/audit/internal/domain"
+              type: "Action"
+          - column: "audit.event.outcome"
+            go_type:
+              import: "github.com/laenen-ai/audit/internal/domain"
+              type: "Outcome"
+          - column: "audit.chain_head.tenant_id"
+            go_type:
+              import: "github.com/laenen-ai/audit/internal/domain"
+              type: "TenantID"
+          - column: "audit.chain_head.pool_id"
+            go_type:
+              import: "github.com/laenen-ai/audit/internal/domain"
+              type: "PoolID"
+          # The two timestamptz columns map to time.Time rather than to
+          # pgtype.Timestamptz, which is what pgx/v5 would otherwise produce
+          # for a NOT NULL timestamptz. Both are NOT NULL, so the pgtype
+          # wrapper's Valid flag encodes a state the schema does not permit,
+          # and recorded_at in particular is a field the entry digest commits
+          # to: it goes through domain.CanonicalTime on the way in and on the
+          # way out, and a wrapper around it would put a .Time dereference
+          # between the column and the canonicalizer in both directions.
+          - column: "audit.event.recorded_at"
+            go_type: "time.Time"
+          - column: "audit.chain_head.updated_at"
+            go_type: "time.Time"

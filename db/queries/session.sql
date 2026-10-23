@@ -1,0 +1,24 @@
+-- The one statement this adapter runs that reads and writes nothing: the
+-- per-transaction tenant scoping the row-level security policies in
+-- 00001_audit.sql evaluate against.
+
+-- SetTenantScope narrows a transaction this adapter opened for itself to one
+-- tenant, for the lifetime of that transaction only.
+--
+-- The third argument to set_config is is_local, and true is the whole point:
+-- the setting is gone the instant the transaction ends, whether by commit or
+-- rollback, so the pooled connection underneath can be handed to the next
+-- caller carrying no trace of it. That property is what the row-level
+-- security backstop depends on to stay fail-closed, and it is why the
+-- adapter never runs this against a caller-supplied transaction — the
+-- scoping would outlive the append and silently re-scope every statement the
+-- caller ran afterwards.
+--
+-- The tenant travels as a bound parameter, never as SQL text. It arrives here
+-- as a plain string rather than as a domain.TenantID, because this is a
+-- function argument and not a column: an sqlc override keys on a column, so
+-- there is nothing here for it to attach a type to. The adapter converts at
+-- the call site, which is one conversion in one place.
+--
+-- name: SetTenantScope :exec
+SELECT set_config('app.tenant_id', @tenant_id, true);
