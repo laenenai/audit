@@ -230,6 +230,8 @@ type EventID string
 
 func (EventID) Time() time.Time
 
+const ExportEntryDomainTag = entryDomainTag
+
 const FirstSequence uint64 = 1
 
 type FixedClock struct {

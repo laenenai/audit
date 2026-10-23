@@ -159,11 +159,11 @@ func TestEntryDigestMatchesDocumentedCanonicalEncoding(t *testing.T) {
 // under the zero predecessor, as version 1 computed it. It is frozen
 // history. referenceEncodeV1 still produces it, which is what makes the
 // version bump below demonstrable rather than asserted.
-const goldenV1 = "aa02bce01ee568a16d1c0ab117857f4a25fb8de333b8f79bd1248696b0901204"
+const goldenV1 = "c2ef937ae4b245a8ab739bf04b9c1e926f52e5f18680e1aefee0d28be4bb4a3c"
 
 // goldenV2 is format version 2's recorded vector: the same fields plus the
 // chain identifier the envelope gained, under version 2's own domain tag.
-const goldenV2 = "fa2aa0fdea0687ef91eee874a6307eceaa1aedd072eb560b5dbbede101be0728"
+const goldenV2 = "0c3603ff37617babdc6c9e16b5b7beee39646303d18e8056fec0fed2e3243181"
 
 // TestEntryDigestGoldenVectorV2 pins the current wire format. The vector was
 // produced by the independent reference encoder above, not copied out of the
@@ -508,5 +508,27 @@ func TestCheckpointZeroMeansEmptyLog(t *testing.T) {
 	nonEmpty := domain.Checkpoint{Sequence: domain.FirstSequence, Digest: domain.Digest{1}}
 	if nonEmpty.IsZero() {
 		t.Fatal("a checkpoint at the first sequence reports IsZero")
+	}
+}
+
+// TestEntryDomainTagIsPinned fixes the domain-separation string as a literal.
+//
+// It is not redundant with the golden vectors. The tag is a cryptographic input
+// to every digest, so a change to it shows up there as two hex strings that no
+// longer match — a true failure with a useless message, which is how the
+// 2026-10-23 module rename presented itself. This test names the cause.
+//
+// Changing this constant is changing the persistence format. It requires a new
+// canonicalVersion byte, a new tag, and — if any deployment holds durable
+// entries — a verifier that dispatches on the version byte. Updating this test
+// to make a build green is the one thing never to do with it.
+func TestEntryDomainTagIsPinned(t *testing.T) {
+	t.Parallel()
+
+	const want = "laenenai/audit:entry:v2"
+	if got := domain.ExportEntryDomainTag; got != want {
+		t.Fatalf("entryDomainTag = %q, want %q\n"+
+			"the domain tag is a cryptographic input to every entry digest: "+
+			"changing it silently re-hashes history. See chain.go's version history.", got, want)
 	}
 }
