@@ -734,3 +734,66 @@ var (
 	_ pglog.DB = (*pgxpool.Pool)(nil)
 	_ pglog.DB = (pgx.Tx)(nil)
 )
+
+// Verification pages through the chain and then asks for the head, and each
+// unenlisted read is its own transaction — so a pass over a chain that is
+// still being appended to can see a head that is ahead of the entries it
+// walked, which Verify correctly calls a head mismatch and which is not
+// tampering.
+//
+// Enlistment is the answer, and this is the test of it: a REPEATABLE READ
+// transaction in the context makes every read in the pass come from one
+// snapshot, so the verdict is about a consistent chain even while appends
+// land. The unenlisted half is deliberately not asserted to fail — it is a
+// race, and asserting that a race goes the bad way is how a test becomes
+// flaky — but the enlisted half must never fail.
+func TestPostgres_VerifyUnderConcurrentAppendsIsStableInOneSnapshot(t *testing.T) {
+	t.Parallel()
+
+	db := testdb.Start(t)
+	ctx := context.Background()
+	log := openLog(ctx, t, db.Pool(), chainFor(t))
+
+	for range 20 {
+		if _, err := log.Append(ctx, testRecord()); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := log.Append(ctx, testRecord()); err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-done
+	})
+
+	for pass := range 5 {
+		tx, err := db.Pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+		if err != nil {
+			t.Fatalf("begin the verification snapshot: %v", err)
+		}
+
+		head, err := audit.Verify(pglog.WithTx(ctx, tx), log, audit.VerifyOptions{PageSize: 4})
+		_ = tx.Rollback(ctx)
+		if err != nil {
+			t.Fatalf("pass %d: Verify in a repeatable-read snapshot while appends are landing: %v\n"+
+				"a verification pass enlisted in one snapshot must see a consistent chain", pass, err)
+		}
+		if head.Sequence < 20 {
+			t.Fatalf("pass %d: verified head %s, want at least the 20 seeded entries", pass, head)
+		}
+	}
+}

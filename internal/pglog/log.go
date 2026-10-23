@@ -26,6 +26,14 @@ var zeroDigest = make([]byte, len(domain.Digest{}))
 // one and not the other is a bug that compiles.
 const eventColumns = `sequence, event_id, recorded_at, actor_id, subject_kind, subject_id, action, outcome, detail, link_prev, link_self`
 
+// maxPreallocatedPage bounds how much Entries reserves up front. The limit a
+// caller passes is still honoured by the query; what this bounds is the
+// slice allocated before a single row has arrived, so that a caller asking
+// for a billion entries costs a growing slice rather than an immediate
+// multi-gigabyte reservation. It is above any page size a chain walk
+// sensibly uses.
+const maxPreallocatedPage = 4096
+
 // Append implements eventlog.Log.
 //
 // It is one read-modify-write the adapter owns entirely: it locks the
@@ -147,7 +155,7 @@ func (l *pgLog) Entries(ctx context.Context, from uint64, limit int) ([]domain.E
 	}
 	defer rows.Close()
 
-	out := make([]domain.Entry, 0, limit)
+	out := make([]domain.Entry, 0, min(limit, maxPreallocatedPage))
 	for rows.Next() {
 		entry, err := l.scanEntry(rows)
 		if err != nil {
@@ -173,6 +181,22 @@ func (l *pgLog) Entries(ctx context.Context, from uint64, limit int) ([]domain.E
 // is: without the tenant scoping a read would return nothing under
 // row-level security, and without the role switch it would run with more
 // privilege than the deployment intends.
+//
+// # Verifying a live chain needs one snapshot, and enlistment is how to get it
+//
+// Each unenlisted read is its own transaction, so a verification pass that
+// pages through a chain while appends are landing sees a moving target: the
+// last page can be followed by a new append, and the head read after it is
+// then ahead of the chain the walk saw, which Verify correctly reports as a
+// head mismatch. That is not tampering, and it is not specific to this
+// adapter — the in-memory one holds no lock across a Verify either — but
+// here there is something to do about it.
+//
+// A caller that wants a verification pass over a live chain opens a
+// REPEATABLE READ transaction, puts it in the context with WithTx, and calls
+// Verify with that context: every read in the pass, the head read included,
+// then comes from one snapshot. See
+// TestPostgres_VerifyUnderConcurrentAppendsIsStableInOneSnapshot.
 func (l *pgLog) reader(ctx context.Context) (querier, func(), error) {
 	if tx := txFromContext(ctx); tx != nil {
 		return tx, func() {}, nil
