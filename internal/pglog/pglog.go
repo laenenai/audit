@@ -38,6 +38,33 @@
 // WithTx. When there is none it opens its own, because the case that most
 // needs auditing has no transaction to join: a denial means nothing
 // happened, and the record of it must survive regardless.
+//
+// # Where the SQL is
+//
+// Every statement that reads or writes this module's own tables is in
+// db/queries/*.sql and reaches Go through internal/pglog/gen, which sqlc
+// generates against db/migrations. The reasoning that belongs to a statement
+// lives beside it there, as SQL, checked against the schema at generation
+// time; this package holds the transaction shape and the conversions into
+// domain types, and nothing else.
+//
+// What is left hand-written is three statements, none of which touch this
+// module's tables, and each of which is a case CONVENTIONS.md's sqlc rule
+// names rather than a departure from it:
+//
+//   - SET LOCAL ROLE, in scopeTransaction. It takes no bound parameter, so
+//     the role name has to reach Postgres as SQL text: the statement is
+//     composed at run time from configuration by definition, which is the
+//     one genuine exception. The value is validated as a plain identifier at
+//     Open and quoted with pgx.Identifier.Sanitize at every use.
+//   - The two catalog probes — canAssumeRole below, and CheckEnforcement's
+//     query in enforcement.go. Both are static, and sqlc still cannot
+//     generate either: they read pg_roles, pg_class and pg_trigger and call
+//     pg_has_role and has_table_privilege, while sqlc resolves every
+//     relation against the migrations in db/migrations, which do not contain
+//     the system catalogs. Declaring fake pg_catalog tables to satisfy the
+//     generator would make generated code agree with a fiction, so these
+//     stay in Go, each in one place, with its reasoning on it.
 package pglog
 
 import (
@@ -53,17 +80,24 @@ import (
 	"github.com/laenen-ai/audit/internal/eventlog"
 )
 
-// Schema and the table names are this adapter's copy of what
-// internal/migrate creates. They are duplicated rather than imported
-// because internal/migrate imports goose, and a consumer that opens a log
-// without applying migrations itself should not link a migration engine.
+// Schema is this adapter's copy of the schema name internal/migrate
+// creates. It is duplicated rather than imported because internal/migrate
+// imports goose, and a consumer that opens a log without applying migrations
+// itself should not link a migration engine.
 //
 // The duplication is checked rather than hoped for:
 // TestTableNamesMatchTheMigratedSchema reads both and fails if they drift.
+//
+// eventTable is the only qualified table name still written in Go, and it is
+// here for the enforcement probe alone — the probe asks the catalog about
+// audit.event by name, and it is the one query in this package sqlc cannot
+// generate (see the package doc comment). Every statement against this
+// module's tables names them in db/queries/*.sql instead, where sqlc checks
+// the name against db/migrations at generation time, which is a stronger
+// guarantee than this constant ever was.
 const (
 	Schema     = "audit"
 	eventTable = Schema + ".event"
-	headTable  = Schema + ".chain_head"
 )
 
 // DB is the narrow database handle this adapter needs: enough to run a
@@ -76,15 +110,6 @@ const (
 // run enlisted in a caller's transaction and standalone.
 type DB interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-// querier is the read-and-write half of DB, without Begin: satisfied by a
-// pool and by a transaction alike, so every statement in this package is
-// written once and runs in either.
-type querier interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -250,6 +275,10 @@ func txFromContext(ctx context.Context) pgx.Tx {
 }
 
 // canAssumeRole reports whether the connected role may SET ROLE to role.
+//
+// It is one of the two catalog probes this package keeps in Go rather than
+// in db/queries: sqlc has no pg_roles to resolve it against. See the package
+// doc comment.
 func canAssumeRole(ctx context.Context, db DB, role string) (bool, error) {
 	var ok bool
 	err := db.QueryRow(ctx,

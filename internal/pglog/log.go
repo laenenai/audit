@@ -1,5 +1,13 @@
 // This file is the Log implementation: the three port methods, the one
 // transaction shape they share, and the row mapping.
+//
+// There is no SQL in it. Every statement it runs is in db/queries/*.sql and
+// reaches Go through internal/pglog/gen, which sqlc generates against
+// db/migrations — so a column renamed in the schema and not in a query is a
+// generation failure rather than a run-time one. What is left here is the
+// part a query file cannot hold: the transaction shape, and the conversions
+// between a row's primitives and the domain types whose invariants a
+// generated scan must not be allowed to bypass.
 
 package pglog
 
@@ -7,11 +15,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenen-ai/audit/internal/pglog/gen"
 )
 
 // zeroDigest is the genesis entry's predecessor, as the 32 bytes a freshly
@@ -21,19 +29,6 @@ import (
 // reserved value the chain uses for that exact meaning.
 var zeroDigest = make([]byte, len(domain.Digest{}))
 
-// eventColumns is the select list every read uses, in the order scanEntry
-// expects. One constant rather than two literals, because a column added to
-// one and not the other is a bug that compiles.
-const eventColumns = `sequence, event_id, recorded_at, actor_id, subject_kind, subject_id, action, outcome, detail, link_prev, link_self`
-
-// maxPreallocatedPage bounds how much Entries reserves up front. The limit a
-// caller passes is still honoured by the query; what this bounds is the
-// slice allocated before a single row has arrived, so that a caller asking
-// for a billion entries costs a growing slice rather than an immediate
-// multi-gigabyte reservation. It is above any page size a chain walk
-// sensibly uses.
-const maxPreallocatedPage = 4096
-
 // Append implements eventlog.Log.
 //
 // It is one read-modify-write the adapter owns entirely: it locks the
@@ -42,13 +37,9 @@ const maxPreallocatedPage = 4096
 // whole of it fits inside a transaction the caller supplied and a rollback
 // leaves no stale state behind for the next append to trip over.
 //
-// The head row lock is what makes the chain a chain under concurrency. Two
-// appenders that both observed head N would both produce an entry claiming
-// sequence N+1 with predecessor N, and one of them would have to be thrown
-// away. Locking the head row means the second appender waits and then
-// observes N+1, so the chain comes out contiguous and correctly linked with
-// no retry loop anywhere. An append to a different chain locks a different
-// row and is not delayed at all.
+// The head row lock is what makes the chain a chain under concurrency; see
+// db/queries/chain_head.sql, where that reasoning sits next to the statement
+// it is about.
 func (l *pgLog) Append(ctx context.Context, rec domain.Record) (domain.Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.Entry{}, fmt.Errorf("audit: append: %w", err)
@@ -100,12 +91,10 @@ func (l *pgLog) Head(ctx context.Context) (domain.Checkpoint, error) {
 	}
 	defer release()
 
-	var sequence int64
-	var digest []byte
-	err = q.QueryRow(ctx, `
-		SELECT sequence, digest FROM `+headTable+`
-		WHERE tenant_id = $1 AND pool_id = $2
-	`, string(l.chain.Tenant), string(l.chain.Pool)).Scan(&sequence, &digest)
+	row, err := q.ChainHead(ctx, gen.ChainHeadParams{
+		TenantID: l.chain.Tenant,
+		PoolID:   l.chain.Pool,
+	})
 	if err != nil {
 		// A chain with no head row has never been appended to. That is the
 		// zero Checkpoint, which is what an empty log reports, and not an
@@ -115,18 +104,18 @@ func (l *pgLog) Head(ctx context.Context) (domain.Checkpoint, error) {
 		}
 		return domain.Checkpoint{}, mapErr("head", err)
 	}
-	return checkpointFrom(sequence, digest)
+	return checkpointFrom(row.Sequence, row.Digest)
 }
 
-// Entries implements eventlog.Log.
+// Entries implements eventlog.Log. The predicate, the ordering and what the
+// index does with them are documented beside the statement in
+// db/queries/event.sql.
 //
-// The predicate is (tenant_id, pool_id, sequence >= from) ordered by
-// sequence, which is exactly the primary key's leading columns, so this is
-// an index scan already in chain order rather than a sort. Partition pruning
-// on tenant_id narrows it to one hash partition; there is no time predicate
-// to prune the range partitions within it, because a chain walk is defined
-// by sequence and asking for a time window would be asking a different
-// question.
+// Nothing is preallocated before the query runs: the generated layer appends
+// rows as they arrive and this one sizes its own slice from what came back,
+// so a caller asking for a billion entries costs a growing slice rather than
+// an immediate multi-gigabyte reservation. The limit itself is still the
+// caller's and is enforced by the query.
 func (l *pgLog) Entries(ctx context.Context, from uint64, limit int) ([]domain.Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("audit: entries: %w", err)
@@ -144,30 +133,26 @@ func (l *pgLog) Entries(ctx context.Context, from uint64, limit int) ([]domain.E
 	}
 	defer release()
 
-	rows, err := q.Query(ctx, `
-		SELECT `+eventColumns+` FROM `+eventTable+`
-		WHERE tenant_id = $1 AND pool_id = $2 AND sequence >= $3
-		ORDER BY sequence
-		LIMIT $4
-	`, string(l.chain.Tenant), string(l.chain.Pool), int64(from), int64(limit)) //nolint:gosec // both are bounded by the caller's own page request
+	rows, err := q.EventsFromSequence(ctx, gen.EventsFromSequenceParams{
+		TenantID:     l.chain.Tenant,
+		PoolID:       l.chain.Pool,
+		FromSequence: int64(from), //nolint:gosec // bounded by the caller's own page request
+		PageLimit:    int64(limit),
+	})
 	if err != nil {
 		return nil, mapErr("entries", err)
 	}
-	defer rows.Close()
+	if len(rows) == 0 {
+		return nil, nil
+	}
 
-	out := make([]domain.Entry, 0, min(limit, maxPreallocatedPage))
-	for rows.Next() {
-		entry, err := l.scanEntry(rows)
+	out := make([]domain.Entry, 0, len(rows))
+	for _, row := range rows {
+		entry, err := l.entryFrom(row)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, mapErr("entries: read", err)
-	}
-	if len(out) == 0 {
-		return nil, nil
 	}
 	return out, nil
 }
@@ -197,9 +182,9 @@ func (l *pgLog) Entries(ctx context.Context, from uint64, limit int) ([]domain.E
 // Verify with that context: every read in the pass, the head read included,
 // then comes from one snapshot. See
 // TestPostgres_VerifyUnderConcurrentAppendsIsStableInOneSnapshot.
-func (l *pgLog) reader(ctx context.Context) (querier, func(), error) {
+func (l *pgLog) reader(ctx context.Context) (*gen.Queries, func(), error) {
 	if tx := txFromContext(ctx); tx != nil {
-		return tx, func() {}, nil
+		return gen.New(tx), func() {}, nil
 	}
 
 	tx, err := l.db.Begin(ctx)
@@ -212,7 +197,7 @@ func (l *pgLog) reader(ctx context.Context) (querier, func(), error) {
 	}
 	// Rolled back rather than committed: a read changed nothing, and a
 	// rollback is the cheaper and more honest way to end it.
-	return tx, func() { _ = tx.Rollback(ctx) }, nil
+	return gen.New(tx), func() { _ = tx.Rollback(ctx) }, nil
 }
 
 // scopeTransaction narrows a transaction this adapter opened for itself to
@@ -228,16 +213,19 @@ func (l *pgLog) reader(ctx context.Context) (querier, func(), error) {
 // outlive the append and silently re-scope every statement the caller runs
 // afterwards.
 //
-// The tenant travels as a bound parameter rather than as SQL text. The role
-// cannot — SET LOCAL ROLE takes no parameters — so it is validated as a
-// plain identifier at Open and quoted here.
+// The tenant travels as a bound parameter, through the generated
+// SetTenantScope. The role cannot — SET LOCAL ROLE takes no parameters, so
+// the role name is the one value in this package that has to reach Postgres
+// as SQL text, which is why it is validated as a plain identifier at Open
+// and quoted here. That statement is this package's documented exception to
+// sqlc; see the package doc comment.
 func (l *pgLog) scopeTransaction(ctx context.Context, tx pgx.Tx) error {
 	if l.appRole != "" {
 		if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{l.appRole}.Sanitize()); err != nil {
 			return mapErr("assume the application role", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", string(l.chain.Tenant)); err != nil {
+	if err := gen.New(tx).SetTenantScope(ctx, string(l.chain.Tenant)); err != nil {
 		return mapErr("set the tenant scope", err)
 	}
 	return nil
@@ -245,7 +233,9 @@ func (l *pgLog) scopeTransaction(ctx context.Context, tx pgx.Tx) error {
 
 // appendIn performs the append inside tx, whoever owns tx.
 func (l *pgLog) appendIn(ctx context.Context, tx pgx.Tx, rec domain.Record) (domain.Entry, error) {
-	head, err := l.lockHead(ctx, tx)
+	q := gen.New(tx)
+
+	head, err := l.lockHead(ctx, q)
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -258,129 +248,109 @@ func (l *pgLog) appendIn(ctx context.Context, tx pgx.Tx, rec domain.Record) (dom
 	event := domain.NewEvent(l.chain, id, head.Sequence+1, l.clock.Now(), rec)
 	entry := domain.NewEntry(head.Digest, event)
 
-	if err := l.insertEntry(ctx, tx, entry); err != nil {
+	if err := l.insertEntry(ctx, q, entry); err != nil {
 		return domain.Entry{}, err
 	}
-	if err := l.moveHead(ctx, tx, entry); err != nil {
+	if err := l.moveHead(ctx, q, entry); err != nil {
 		return domain.Entry{}, err
 	}
 	return entry, nil
 }
 
 // lockHead takes the chain's head row for update, creating it if this is the
-// chain's first append, and returns the checkpoint it names.
-//
-// It is two statements because a chain's first append has no row to lock.
-// INSERT ... ON CONFLICT DO NOTHING is the race-safe half: a concurrent
-// identical insert makes this one wait for that transaction and then insert
-// nothing, and if that transaction aborted instead, Postgres retries the
-// insertion rather than reporting a conflict with a row that no longer
-// exists. The SELECT ... FOR UPDATE that follows is what every subsequent
-// appender on this chain serializes on.
-func (l *pgLog) lockHead(ctx context.Context, tx pgx.Tx) (domain.Checkpoint, error) {
-	_, err := tx.Exec(ctx, `
-		INSERT INTO `+headTable+` (tenant_id, pool_id, sequence, digest, updated_at)
-		VALUES ($1, $2, 0, $3, now())
-		ON CONFLICT (tenant_id, pool_id) DO NOTHING
-	`, string(l.chain.Tenant), string(l.chain.Pool), zeroDigest)
+// chain's first append, and returns the checkpoint it names. It is two
+// statements because a chain's first append has no row to lock; see
+// db/queries/chain_head.sql for why each half is shaped the way it is.
+func (l *pgLog) lockHead(ctx context.Context, q *gen.Queries) (domain.Checkpoint, error) {
+	err := q.CreateChainHeadIfAbsent(ctx, gen.CreateChainHeadIfAbsentParams{
+		TenantID: l.chain.Tenant,
+		PoolID:   l.chain.Pool,
+		Digest:   zeroDigest,
+	})
 	if err != nil {
 		return domain.Checkpoint{}, mapErr("append: create the chain head", err)
 	}
 
-	var sequence int64
-	var digest []byte
-	err = tx.QueryRow(ctx, `
-		SELECT sequence, digest FROM `+headTable+`
-		WHERE tenant_id = $1 AND pool_id = $2
-		FOR UPDATE
-	`, string(l.chain.Tenant), string(l.chain.Pool)).Scan(&sequence, &digest)
+	row, err := q.LockChainHead(ctx, gen.LockChainHeadParams{
+		TenantID: l.chain.Tenant,
+		PoolID:   l.chain.Pool,
+	})
 	if err != nil {
 		return domain.Checkpoint{}, mapErr("append: lock the chain head", err)
 	}
-	return checkpointFrom(sequence, digest)
+	return checkpointFrom(row.Sequence, row.Digest)
 }
 
-// insertEntry writes the history row. It is the only INSERT in this package
-// that touches audit.event, and the only privilege on that table the
-// application role is meant to hold.
-func (l *pgLog) insertEntry(ctx context.Context, tx pgx.Tx, entry domain.Entry) error {
+// insertEntry writes the history row: the only INSERT on audit.event in this
+// module, and the only privilege on that table the application role is meant
+// to hold beyond SELECT.
+func (l *pgLog) insertEntry(ctx context.Context, q *gen.Queries, entry domain.Entry) error {
 	e := entry.Event
-	_, err := tx.Exec(ctx, `
-		INSERT INTO `+eventTable+` (
-			tenant_id, pool_id, sequence, event_id, recorded_at,
-			actor_id, subject_kind, subject_id, action, outcome, detail,
-			link_prev, link_self
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-	`,
-		string(e.Chain.Tenant), string(e.Chain.Pool), int64(e.Sequence), //nolint:gosec // a sequence is a positive counter, not an external length
-		string(e.ID), e.Timestamp,
-		string(e.Actor), e.Subject.Kind, e.Subject.ID, string(e.Action), string(e.Outcome), detailBytes(e.Detail),
-		entry.Link.Prev[:], entry.Link.Self[:],
-	)
+	err := q.InsertEvent(ctx, gen.InsertEventParams{
+		TenantID:   e.Chain.Tenant,
+		PoolID:     e.Chain.Pool,
+		Sequence:   int64(e.Sequence), //nolint:gosec // a sequence is a positive counter, not an external length
+		EventID:    e.ID,
+		RecordedAt: e.Timestamp,
+
+		ActorID:     e.Actor,
+		SubjectKind: e.Subject.Kind,
+		SubjectID:   e.Subject.ID,
+		Action:      e.Action,
+		Outcome:     e.Outcome,
+		Detail:      detailBytes(e.Detail),
+
+		LinkPrev: entry.Link.Prev[:],
+		LinkSelf: entry.Link.Self[:],
+	})
 	if err != nil {
 		return mapErr("append: insert the entry", err)
 	}
 	return nil
 }
 
-// moveHead advances the head row to the entry just written.
-//
-// The WHERE clause names the sequence the head was expected to be at, so
-// this is an optimistic check on top of the pessimistic row lock. The lock
-// already makes a lost update impossible; the predicate is what turns a
-// future bug that drops the lock into a failed append instead of a silently
-// forked chain, and it costs nothing — the row is already locked and in
-// cache.
-func (l *pgLog) moveHead(ctx context.Context, tx pgx.Tx, entry domain.Entry) error {
-	tag, err := tx.Exec(ctx, `
-		UPDATE `+headTable+`
-		SET sequence = $3, digest = $4, updated_at = now()
-		WHERE tenant_id = $1 AND pool_id = $2 AND sequence = $3 - 1
-	`,
-		string(l.chain.Tenant), string(l.chain.Pool),
-		int64(entry.Event.Sequence), //nolint:gosec // a sequence is a positive counter
-		entry.Link.Self[:],
-	)
+// moveHead advances the head row to the entry just written. Zero rows moved
+// means the head was not where this append left the lock, which the query
+// file explains and which is a failed append rather than a forked chain.
+func (l *pgLog) moveHead(ctx context.Context, q *gen.Queries, entry domain.Entry) error {
+	moved, err := q.MoveChainHead(ctx, gen.MoveChainHeadParams{
+		TenantID: l.chain.Tenant,
+		PoolID:   l.chain.Pool,
+		Sequence: int64(entry.Event.Sequence), //nolint:gosec // a sequence is a positive counter
+		Digest:   entry.Link.Self[:],
+	})
 	if err != nil {
 		return mapErr("append: move the chain head", err)
 	}
-	if tag.RowsAffected() != 1 {
+	if moved != 1 {
 		return fmt.Errorf("%w: audit: append: the chain head moved underneath this append: it was not at sequence %d",
 			domain.ErrUnavailable, entry.Event.Sequence-1)
 	}
 	return nil
 }
 
-// scanEntry maps one row onto an Entry. The chain identifier is taken from
-// the log rather than read back, because it is the log's own binding and is
-// already in every row's WHERE clause: reading it would be asking the
-// database to confirm a value we used to find the row.
-func (l *pgLog) scanEntry(rows pgx.Rows) (domain.Entry, error) {
-	var (
-		sequence           int64
-		eventID            string
-		recordedAt         time.Time
-		actor              string
-		subjectKind        string
-		subjectID          string
-		action             string
-		outcome            string
-		detail             []byte
-		linkPrev, linkSelf []byte
-	)
-	if err := rows.Scan(&sequence, &eventID, &recordedAt, &actor, &subjectKind, &subjectID,
-		&action, &outcome, &detail, &linkPrev, &linkSelf); err != nil {
-		return domain.Entry{}, mapErr("entries: scan", err)
-	}
-	if sequence < 0 {
+// entryFrom maps one generated row onto an Entry.
+//
+// The generated row already carries the typed domain ids — the sqlc
+// overrides in sqlc.yaml see to that, so there is no bare string to retype
+// here. What is left is the three conversions a generated scan cannot do:
+// the two digests, which go through domain's validating parser rather than
+// through a Scanner method on Digest (see sqlc.yaml for why that method must
+// not exist), the subject, which is one domain value spanning two columns,
+// and the chain identifier, which is taken from the log rather than read
+// back — it is the log's own binding and is already in every row's WHERE
+// clause, so reading it would be asking the database to confirm a value we
+// used to find the row.
+func (l *pgLog) entryFrom(row gen.EventsFromSequenceRow) (domain.Entry, error) {
+	if row.Sequence < 0 {
 		return domain.Entry{}, fmt.Errorf("%w: audit: entries: a stored sequence is negative", domain.ErrStorage)
 	}
 
-	prev, err := digestFrom(linkPrev)
+	prev, err := digestFrom(row.LinkPrev)
 	if err != nil {
 		return domain.Entry{}, err
 	}
-	self, err := digestFrom(linkSelf)
+	self, err := digestFrom(row.LinkSelf)
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -388,19 +358,19 @@ func (l *pgLog) scanEntry(rows pgx.Rows) (domain.Entry, error) {
 	return domain.Entry{
 		Event: domain.Event{
 			Chain:    l.chain,
-			ID:       domain.EventID(eventID),
-			Sequence: uint64(sequence),
+			ID:       row.EventID,
+			Sequence: uint64(row.Sequence),
 			// Canonicalized on the way out as well as on the way in.
 			// timestamptz round-trips at microsecond precision, and pgx
 			// hands the value back in the session's offset rather than in
 			// UTC; the digest committed to the canonical form, so anything
 			// else here would report every entry as tampered.
-			Timestamp: domain.CanonicalTime(recordedAt),
-			Actor:     domain.ActorID(actor),
-			Subject:   domain.SubjectRef{Kind: subjectKind, ID: subjectID},
-			Action:    domain.Action(action),
-			Outcome:   domain.Outcome(outcome),
-			Detail:    detail,
+			Timestamp: domain.CanonicalTime(row.RecordedAt),
+			Actor:     row.ActorID,
+			Subject:   domain.SubjectRef{Kind: row.SubjectKind, ID: row.SubjectID},
+			Action:    row.Action,
+			Outcome:   row.Outcome,
+			Detail:    row.Detail,
 		},
 		Link: domain.ChainLink{Prev: prev, Self: self},
 	}, nil
@@ -432,6 +402,12 @@ func checkpointFrom(sequence int64, digest []byte) (domain.Checkpoint, error) {
 // constraint for the same thing; this is the Go side of it, and the one that
 // still holds if the row arrived from somewhere the constraint did not
 // cover.
+//
+// It is also the reason no sqlc override maps a bytea column to Digest: the
+// only way to make a generated scan produce one directly is a sql.Scanner on
+// Digest, which would be an exported method anyone could call with arbitrary
+// bytes. Converting here keeps the check in one place and the type
+// unforgeable.
 func digestFrom(b []byte) (domain.Digest, error) {
 	var d domain.Digest
 	if len(b) != len(d) {
