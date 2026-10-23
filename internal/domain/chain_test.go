@@ -47,7 +47,7 @@ func (w *writer) timestamp(t time.Time) {
 func referenceEncode(e domain.Event) []byte {
 	var w writer
 
-	w.b.WriteByte(2) // format version
+	w.b.WriteByte(1) // format version
 
 	w.lenPrefixed([]byte(e.Chain.Tenant))
 	w.lenPrefixed([]byte(e.Chain.Pool))
@@ -64,43 +64,10 @@ func referenceEncode(e domain.Event) []byte {
 	return w.b.Bytes()
 }
 
-// referenceEncodeV1 is the *frozen* version 1 encoding: the format before
-// the envelope gained a chain identifier. It is kept, unchanged and never
-// to be changed, for exactly one purpose — so that
-// TestEntryDigestGoldenVectorV1 can still produce version 1's recorded
-// vector and TestEntryDigestFormatVersionBumpIsVisible can show that the
-// current encoder no longer produces it. Nothing in the module calls it,
-// and no chain was ever persisted with it (version 1 shipped with an
-// in-memory adapter only), so it is a record of a format change rather
-// than a compatibility path.
-func referenceEncodeV1(e domain.Event) []byte {
-	var w writer
-
-	w.b.WriteByte(1) // format version
-
-	w.lenPrefixed([]byte(e.ID))
-	w.u64(e.Sequence)
-	w.timestamp(e.Timestamp)
-	w.lenPrefixed([]byte(e.Actor))
-	w.lenPrefixed([]byte(e.Subject.Kind))
-	w.lenPrefixed([]byte(e.Subject.ID))
-	w.lenPrefixed([]byte(e.Action))
-	w.lenPrefixed([]byte(e.Outcome))
-	w.lenPrefixed(e.Detail)
-
-	return w.b.Bytes()
-}
-
 // referenceDigest recomputes an entry digest the way chain.go's doc comment
 // describes it, independently of chain.go's code.
 func referenceDigest(prev domain.Digest, e domain.Event) domain.Digest {
-	return taggedDigest("laenenai/audit:entry:v2", prev, referenceEncode(e))
-}
-
-// referenceDigestV1 is the frozen version 1 digest, with version 1's
-// domain-separation tag. See referenceEncodeV1.
-func referenceDigestV1(prev domain.Digest, e domain.Event) domain.Digest {
-	return taggedDigest("laenenai/audit:entry:v1", prev, referenceEncodeV1(e))
+	return taggedDigest("audit:entry:v1", prev, referenceEncode(e))
 }
 
 // taggedDigest is SHA-256( len(tag) || tag || prev || canonical ), the
@@ -155,64 +122,30 @@ func TestEntryDigestMatchesDocumentedCanonicalEncoding(t *testing.T) {
 	}
 }
 
-// goldenV1 is format version 1's recorded vector: the digest of testEventV1
-// under the zero predecessor, as version 1 computed it. It is frozen
-// history. referenceEncodeV1 still produces it, which is what makes the
-// version bump below demonstrable rather than asserted.
-const goldenV1 = "c2ef937ae4b245a8ab739bf04b9c1e926f52e5f18680e1aefee0d28be4bb4a3c"
+// golden is the recorded vector for the one and only wire format. It is
+// regenerated only alongside a new version byte and a new domain tag, never to
+// make a build green.
+const golden = "c7c981f4ef8a5e670e73f4ba41f71dceb0874a286f5d150d83b83c39b056d034"
 
-// goldenV2 is format version 2's recorded vector: the same fields plus the
-// chain identifier the envelope gained, under version 2's own domain tag.
-const goldenV2 = "0c3603ff37617babdc6c9e16b5b7beee39646303d18e8056fec0fed2e3243181"
-
-// TestEntryDigestGoldenVectorV2 pins the current wire format. The vector was
+// TestEntryDigestGoldenVector pins the current wire format. The vector was
 // produced by the independent reference encoder above, not copied out of the
 // production encoder's output, so a change to chain.go that silently alters
 // the canonical form fails here — which matters because the format is a
 // persistence format: every chain ever written was hashed with it.
-func TestEntryDigestGoldenVectorV2(t *testing.T) {
+func TestEntryDigestGoldenVector(t *testing.T) {
 	t.Parallel()
 
-	if got := referenceDigest(domain.Digest{}, testEvent()).String(); got != goldenV2 {
-		t.Fatalf("the independent reference encoder gives %s, want the recorded vector %s", got, goldenV2)
+	if got := referenceDigest(domain.Digest{}, testEvent()).String(); got != golden {
+		t.Fatalf("the independent reference encoder gives %s, want the recorded vector %s", got, golden)
 	}
-	if got := domain.EntryDigest(domain.Digest{}, testEvent()).String(); got != goldenV2 {
+	if got := domain.EntryDigest(domain.Digest{}, testEvent()).String(); got != golden {
 		t.Fatalf("golden entry digest = %s, want %s\n"+
 			"a deliberate format change must bump the version byte and the domain tag, "+
-			"and must be stated in chain.go's doc comment", got, goldenV2)
+			"and must be stated in chain.go's doc comment", got, golden)
 	}
 }
 
-// TestEntryDigestGoldenVectorV1 keeps format version 1's vector reproducible
-// from the frozen version 1 reference encoder. It is not a compatibility
-// path — nothing durable was ever written under version 1 — it is the record
-// that lets the next format change be audited the same way this one is.
-func TestEntryDigestGoldenVectorV1(t *testing.T) {
-	t.Parallel()
-
-	if got := referenceDigestV1(domain.Digest{}, testEventV1()).String(); got != goldenV1 {
-		t.Fatalf("the frozen version 1 encoder gives %s, want version 1's recorded vector %s\n"+
-			"referenceEncodeV1 is history and must not be edited", got, goldenV1)
-	}
-}
-
-// TestEntryDigestFormatVersionBumpIsVisible is the guard the notes ask for:
-// adding the chain identifier changed the encoding, so the current encoder
-// must *not* reproduce version 1's vector, and the two versions must differ
-// even for an event with no chain identifier at all — because the version
-// byte and the domain tag both changed, not only the field list.
-func TestEntryDigestFormatVersionBumpIsVisible(t *testing.T) {
-	t.Parallel()
-
-	if got := domain.EntryDigest(domain.Digest{}, testEventV1()).String(); got == goldenV1 {
-		t.Fatal("the current encoder still produces version 1's vector: the format changed without bumping the version byte and the domain tag")
-	}
-	if referenceDigest(domain.Digest{}, testEventV1()) == referenceDigestV1(domain.Digest{}, testEventV1()) {
-		t.Fatal("version 1 and version 2 hash an unchained event identically: the version byte or the domain tag is not mixed in")
-	}
-}
-
-// The chain identifier is the field version 2 exists for, so it gets its own
+// The chain identifier is what an entry must commit to, so it gets its own
 // assertion rather than only a row in TestEntryDigestCoversEveryField: two
 // chains must never produce the same digest for the same event, or an entry
 // could be moved from one tenant's chain into another's undetected.
@@ -525,7 +458,7 @@ func TestCheckpointZeroMeansEmptyLog(t *testing.T) {
 func TestEntryDomainTagIsPinned(t *testing.T) {
 	t.Parallel()
 
-	const want = "laenenai/audit:entry:v2"
+	const want = "audit:entry:v1"
 	if got := domain.ExportEntryDomainTag; got != want {
 		t.Fatalf("entryDomainTag = %q, want %q\n"+
 			"the domain tag is a cryptographic input to every entry digest: "+
