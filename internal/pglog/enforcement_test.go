@@ -594,3 +594,56 @@ func partitionOf(ctx context.Context, t *testing.T, pool *pgxpool.Pool, chain do
 	}
 	return pgx.Identifier{pglog.Schema, name}.Sanitize()
 }
+
+// TestRLS_AnAddedPermissivePolicyCannotWidenPastTheTenant is the regression
+// test for a cross-tenant disclosure this migration shipped, found by an
+// OpenBao credentials spike against a sibling module.
+//
+// Postgres ORs permissive policies together and ANDs restrictive ones over the
+// result, so a tenant predicate written as a single permissive policy is
+// OR-able away by any additional permissive policy on the same table. Measured
+// on Postgres 18.6 against the arrangement shipped here first: a tenant seeing
+// its own single row saw two the moment a second permissive policy existed,
+// and the second row belonged to another tenant. Any table owner can add such
+// a policy, and nobody would expect adding one to weaken isolation.
+//
+// Asserting the policy kinds from the catalog is not enough on its own — this
+// drives the actual disclosure path, by adding exactly the policy a consumer's
+// reporting view would add and requiring the visible count to stay put.
+func TestRLS_AnAddedPermissivePolicyCannotWidenPastTheTenant(t *testing.T) {
+	t.Parallel()
+
+	db := testdb.Start(t)
+	ctx := context.Background()
+
+	mine := chainFor(t)
+	theirs := chainFor(t)
+	for _, chain := range []domain.ChainID{mine, theirs} {
+		log := openLog(ctx, t, db.Pool(), chain)
+		if _, err := log.Append(ctx, testRecord()); err != nil {
+			t.Fatalf("seed %s: %v", chain, err)
+		}
+	}
+
+	if _, err := db.Pool().Exec(ctx,
+		"CREATE POLICY widen_attempt ON audit.event AS PERMISSIVE USING (true)"); err != nil {
+		t.Fatalf("could not add the permissive policy this test exists to defeat: %v", err)
+	}
+
+	asAppRole(ctx, t, db.Pool(), mine, func(tx pgx.Tx) {
+		var all, others int
+		err := tx.QueryRow(ctx, `
+			SELECT count(*), count(*) FILTER (WHERE tenant_id <> $1) FROM audit.event
+		`, string(mine.Tenant)).Scan(&all, &others)
+		if err != nil {
+			t.Fatalf("count visible entries: %v", err)
+		}
+		if others != 0 || all != 1 {
+			t.Fatalf("with one extra permissive policy present, a session scoped to %s sees "+
+				"%d entries of which %d belong to another tenant, want 1 and 0.\n"+
+				"the tenant predicate was OR-ed away rather than AND-ed: it must be "+
+				"AS RESTRICTIVE, with a permissive companion for it to AND against",
+				mine.Tenant, all, others)
+		}
+	})
+}

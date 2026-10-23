@@ -192,24 +192,51 @@ CREATE TRIGGER reject_history_mutation
 -- A policy on the partitioned parent is applied to its partitions, and the
 -- application role is granted privileges on the parent only (never on a
 -- partition), so there is no direct-to-partition path around it.
+-- The tenant predicate is AS RESTRICTIVE, and that is load-bearing.
+--
+-- Postgres ORs permissive policies together and ANDs restrictive ones over
+-- the result. A tenant predicate written as a single permissive policy —
+-- which is what this migration shipped first — is therefore OR-ed away by
+-- any additional permissive policy on the same table. Measured on Postgres
+-- 18.6: a tenant seeing its own single row saw two the moment a second
+-- permissive policy existed, and the second row belonged to another tenant.
+-- Adding a policy weakened isolation, which any table owner can do and no
+-- consumer would expect.
+--
+-- The permissive companion is required rather than decorative: a table whose
+-- only policies are restrictive has an empty permissive set, and Postgres
+-- then denies every row. tenant_access grants nothing on its own — the
+-- restriction is what filters — it exists so the restriction has something
+-- to AND against. A consumer adding its own permissive policies ORs them
+-- with this one and still cannot escape the AND.
 ALTER TABLE audit.event ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE audit.event FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_isolation ON audit.event
+CREATE POLICY tenant_isolation ON audit.event AS RESTRICTIVE
     USING (tenant_id = nullif(current_setting('app.tenant_id', true), ''))
     WITH CHECK (tenant_id = nullif(current_setting('app.tenant_id', true), ''));
+
+CREATE POLICY tenant_access ON audit.event AS PERMISSIVE
+    USING (true) WITH CHECK (true);
 
 ALTER TABLE audit.chain_head ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE audit.chain_head FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_isolation ON audit.chain_head
+CREATE POLICY tenant_isolation ON audit.chain_head AS RESTRICTIVE
     USING (tenant_id = nullif(current_setting('app.tenant_id', true), ''))
     WITH CHECK (tenant_id = nullif(current_setting('app.tenant_id', true), ''));
 
+CREATE POLICY tenant_access ON audit.chain_head AS PERMISSIVE
+    USING (true) WITH CHECK (true);
+
 -- +goose Down
+DROP POLICY IF EXISTS tenant_access ON audit.chain_head;
+
 DROP POLICY IF EXISTS tenant_isolation ON audit.chain_head;
+
+DROP POLICY IF EXISTS tenant_access ON audit.event;
 
 DROP POLICY IF EXISTS tenant_isolation ON audit.event;
 
