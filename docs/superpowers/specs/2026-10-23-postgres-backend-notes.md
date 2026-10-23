@@ -148,12 +148,38 @@ therefore runs as a role the application is not. So this module's deployment
 needs **two identities**: an owner role that migrates, and an app role that
 inserts and selects.
 
-That is ordinary practice, and it is a genuine qualification of A1's "one
-Postgres connection string": either two DSNs (owner for migration, app for
-runtime), or one owner DSN with a `SET ROLE` to the app role for runtime work.
-The second keeps A1's single-string promise and is the default; the first is
-available for deployments that separate them operationally. The app role's name
-is configuration, because the migration must name it in its `REVOKE`.
+**Decided 2026-10-23 (owner): two pools, not two session states.** Migrations
+get their own pgx pool holding the migration rights; everything else uses a
+per-tenant scoped pool on the application role.
+
+An earlier version of this section offered a single owner DSN with a `SET ROLE`
+to the application role as the default, on the grounds that it kept A1's
+single-connection-string promise. **That was wrong, and it kept the promise by
+weakening the guarantee.** `SET ROLE` is reversible: a session on an owner
+connection can `RESET ROLE` and get the owner's rights back. So the separation
+was per-session and depended on every code path remembering to set — and
+forgetting to set is a silent privilege escalation, which is exactly the class
+of failure this module exists to make impossible.
+
+With two pools the separation is **structural, at the credential level**: the
+runtime pool simply does not possess `UPDATE`, `DELETE` or `TRUNCATE`, so no
+bug, no forgotten statement and no compromised code path can acquire them.
+Nothing has to be remembered.
+
+Two consequences worth stating:
+
+- **The migration pool is short-lived.** Open it, migrate, close it. A
+  long-lived owner pool held in the process for the lifetime of the service is
+  a standing escalation target, and it is unnecessary — migration is a startup
+  activity.
+- **A1 is genuinely two connection strings now**, and that is the right trade.
+  Two DSNs is not a meaningful complexity cost; a privilege boundary that
+  depends on every caller remembering a statement is.
+
+The app role's name remains configuration, because the migration must name it
+in its `REVOKE`, and `CheckEnforcement` becomes simpler and stronger: it asks
+whether the *runtime* pool lacks the mutating privileges, which is a question
+about a credential rather than about a session's current state.
 
 A deployment that declines privilege separation gets a working audit log with
 **no enforcement of append-only** beyond the Go API — which is to say, none
