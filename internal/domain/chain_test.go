@@ -100,15 +100,6 @@ func testEvent() domain.Event {
 	}
 }
 
-// testEventV1 is testEvent with no chain identifier: the shape an Event had
-// under format version 1, which is what version 1's recorded golden vector
-// was computed over.
-func testEventV1() domain.Event {
-	e := testEvent()
-	e.Chain = domain.ChainID{}
-	return e
-}
-
 func TestEntryDigestMatchesDocumentedCanonicalEncoding(t *testing.T) {
 	t.Parallel()
 
