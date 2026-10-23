@@ -53,6 +53,32 @@
 // the state of the database is a function of the configuration rather than
 // of the order in which configurations were tried. Both steps are idempotent
 // and both are safe to run concurrently; see lockKey.
+//
+// # Why there is no sqlc in this package
+//
+// CONVENTIONS.md makes sqlc the default and names one exception: SQL composed
+// at run time. This package is almost entirely that exception, which is why
+// none of its statements moved into db/queries when internal/pglog's did.
+//
+//   - Layers 2 and 3 are DDL whose text is built from configuration — a
+//     partition name from a loop counter and a month, a partition bound from
+//     a time, a role name from Config.AppRole. There is no fixed statement
+//     for a generator to generate, and sqlc does not model DDL as a query in
+//     any case. Every identifier in them goes through
+//     pgx.Identifier.Sanitize, and the whole set of grants and revokes is
+//     one list in privileges.go rather than assembled across methods, which
+//     is what the exception asks for.
+//   - The two statements here that are fixed read the system catalogs
+//     (pg_inherits, through a regclass cast) or call a session function
+//     (pg_advisory_xact_lock). sqlc resolves every relation against the
+//     schema in db/migrations, which does not contain pg_catalog, so it
+//     cannot generate them; declaring fake catalog tables to get past the
+//     generator would make generated code agree with a fiction.
+//
+// db/migrations is nonetheless the schema sqlc generates internal/pglog's
+// queries against, so the migrations this package applies are what keep
+// those queries honest: a column renamed here and not there is a generation
+// failure rather than a run-time one.
 package migrate
 
 import (
