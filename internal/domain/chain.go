@@ -79,6 +79,31 @@
 //     holds many chains and an entry that does not commit to its own chain can
 //     be moved between them.
 //
+// # The domain tag was rewritten once, by accident, and that must not recur
+//
+// On 2026-10-23 the module path was corrected from github.com/laenen-ai to
+// github.com/laenenai, by textual substitution across the repository. The
+// substitution also rewrote entryDomainTag — which is a **cryptographic input
+// to every entry digest** — so both recorded vectors stopped matching, and the
+// golden-vector tests caught it. They were doing exactly their job.
+//
+// The vectors were recomputed under the corrected tag rather than the tag being
+// restored, because that was still safe *on that day and never again*: version
+// 1 had shipped in-memory-only and version 2 was hours old, so no durable chain
+// existed anywhere to be invalidated. Had any deployment been storing entries,
+// the only correct response would have been a version 3.
+//
+// Two conclusions, both now enforced below rather than remembered:
+//
+//   - A domain tag must not be reachable by a find-and-replace over the module
+//     path. TestEntryDomainTagIsPinned asserts the exact literal, so the next
+//     time something edits it the failure says "the domain tag changed" instead
+//     of making a reader work backwards from two mismatched digests.
+//   - A rename is not a refactor when it touches a cryptographic constant. The
+//     same hazard, deriving a coordination constant from an import path, is
+//     benign for an advisory lock key (a different lock is still a valid lock)
+//     and destructive here.
+//
 // There is deliberately no version-1 *decoder* and no dual-version verifier.
 // Version 1 shipped with an in-memory adapter only — nothing durable was ever
 // written under it, so there is no historical chain in the world to keep
