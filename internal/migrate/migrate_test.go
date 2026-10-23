@@ -365,8 +365,33 @@ func TestUp_EnablesAndForcesRowLevelSecurityOnEveryTable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("count policies on audit.%s: %v", table, err)
 		}
-		if policies != 1 {
-			t.Fatalf("audit.%s has %d policies, want exactly 1", table, policies)
+		if policies != 2 {
+			t.Fatalf("audit.%s has %d policies, want exactly 2 "+
+				"(the restrictive tenant policy and its permissive companion)", table, policies)
+		}
+
+		// The kinds, not just the count. A permissive tenant predicate is
+		// OR-ed away by any policy a consumer adds, which is a
+		// cross-tenant disclosure; the restriction is what filters and the
+		// companion exists only so the restriction has something to AND
+		// against. See TestRLS_AnAddedPermissivePolicyCannotWidenPastTheTenant.
+		var tenantKind, accessKind string
+		if err := db.Pool().QueryRow(ctx,
+			`SELECT permissive FROM pg_policies WHERE schemaname = 'audit' AND tablename = $1
+			 AND policyname = 'tenant_isolation'`, table).Scan(&tenantKind); err != nil {
+			t.Fatalf("read the tenant policy's kind on audit.%s: %v", table, err)
+		}
+		if tenantKind != "RESTRICTIVE" {
+			t.Fatalf("audit.%s's tenant policy is %s, want RESTRICTIVE", table, tenantKind)
+		}
+		if err := db.Pool().QueryRow(ctx,
+			`SELECT permissive FROM pg_policies WHERE schemaname = 'audit' AND tablename = $1
+			 AND policyname = 'tenant_access'`, table).Scan(&accessKind); err != nil {
+			t.Fatalf("read the companion policy's kind on audit.%s: %v", table, err)
+		}
+		if accessKind != "PERMISSIVE" {
+			t.Fatalf("audit.%s's companion policy is %s, want PERMISSIVE: with no permissive "+
+				"policy the restrictive one denies every row", table, accessKind)
 		}
 	}
 }
