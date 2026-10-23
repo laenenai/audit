@@ -21,7 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // HashPartitionName returns the name of hash partition i of audit.event.

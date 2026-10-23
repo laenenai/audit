@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // memoryLog is the in-memory Log adapter: a slice of entries behind a

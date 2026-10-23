@@ -18,8 +18,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/pglog/gen"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/pglog/gen"
 )
 
 // zeroDigest is the genesis entry's predecessor, as the 32 bytes a freshly

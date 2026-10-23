@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 func TestNewEventIDIsHexAndSortsByTime(t *testing.T) {

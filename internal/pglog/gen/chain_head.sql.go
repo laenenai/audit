@@ -8,7 +8,7 @@ package gen
 import (
 	"context"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 const chainHead = `-- name: ChainHead :one

@@ -97,8 +97,8 @@ import (
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
 
-	"github.com/laenen-ai/audit/db/migrations"
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/db/migrations"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // Schema is the Postgres schema this module owns. Nothing this module
@@ -118,7 +118,7 @@ const versionTableName = Schema + ".goose_db_version"
 // else sharing the same Postgres cluster, including the consumer's own
 // migrations:
 //
-//	crc32.ChecksumIEEE([]byte("github.com/laenen-ai/audit/internal/migrate"))
+//	crc32.ChecksumIEEE([]byte("github.com/laenenai/audit/internal/migrate"))
 //
 // It must never change: changing it would let an old and a new binary
 // migrate concurrently against each other during a rolling deploy, which is

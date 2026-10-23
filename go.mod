@@ -1,4 +1,4 @@
-module github.com/laenen-ai/audit
+module github.com/laenenai/audit
 
 go 1.25.6
 

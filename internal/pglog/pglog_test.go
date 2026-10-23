@@ -15,12 +15,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/laenen-ai/audit"
-	"github.com/laenen-ai/audit/audittest"
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/migrate"
-	"github.com/laenen-ai/audit/internal/pglog"
-	"github.com/laenen-ai/audit/internal/testdb"
+	"github.com/laenenai/audit"
+	"github.com/laenenai/audit/audittest"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/migrate"
+	"github.com/laenenai/audit/internal/pglog"
+	"github.com/laenenai/audit/internal/testdb"
 )
 
 // quietLogger discards what Open reports. Most tests here run as the

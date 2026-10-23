@@ -17,7 +17,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // Enforcement is what the database actually enforces about append-only, for

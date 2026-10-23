@@ -7,7 +7,7 @@ package gen
 import (
 	"time"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // One row per (tenant, pool) chain: the latest sequence and digest. The only updatable table in this schema, and the lock every append serializes on. Holds no history, so rewriting it cannot rewrite the chain.

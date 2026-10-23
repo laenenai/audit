@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/eventlog"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/eventlog"
 )
 
 // buildChain returns an intact chain of n entries, built the way an adapter

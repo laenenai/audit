@@ -12,9 +12,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/migrate"
-	"github.com/laenen-ai/audit/internal/testdb"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/migrate"
+	"github.com/laenenai/audit/internal/testdb"
 )
 
 // testConfig is the configuration these tests migrate with: the harness's

@@ -23,7 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // reconcilePrivileges creates the application role if it is missing and then

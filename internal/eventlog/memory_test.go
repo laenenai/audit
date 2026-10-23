@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laenen-ai/audit/audittest"
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/eventlog"
+	"github.com/laenenai/audit/audittest"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/eventlog"
 )
 
 func newMemoryLog(t *testing.T) eventlog.Log {

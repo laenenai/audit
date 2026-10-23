@@ -38,35 +38,35 @@ sql:
           #     truncating. One conversion per field, invariant untouched.
           - column: "audit.event.tenant_id"
             go_type:
-              import: "github.com/laenen-ai/audit/internal/domain"
+              import: "github.com/laenenai/audit/internal/domain"
               type: "TenantID"
           - column: "audit.event.pool_id"
             go_type:
-              import: "github.com/laenen-ai/audit/internal/domain"
+              import: "github.com/laenenai/audit/internal/domain"
               type: "PoolID"
           - column: "audit.event.event_id"
             go_type:
-              import: "github.com/laenen-ai/audit/internal/domain"
+              import: "github.com/laenenai/audit/internal/domain"
               type: "EventID"
           - column: "audit.event.actor_id"
             go_type:
-              import: "github.com/laenen-ai/audit/internal/domain"
+              import: "github.com/laenenai/audit/internal/domain"
               type: "ActorID"
           - column: "audit.event.action"
             go_type:
-              import: "github.com/laenen-ai/audit/internal/domain"
+              import: "github.com/laenenai/audit/internal/domain"
               type: "Action"
           - column: "audit.event.outcome"
             go_type:
-              import: "github.com/laenen-ai/audit/internal/domain"
+              import: "github.com/laenenai/audit/internal/domain"
               type: "Outcome"
           - column: "audit.chain_head.tenant_id"
             go_type:
-              import: "github.com/laenen-ai/audit/internal/domain"
+              import: "github.com/laenenai/audit/internal/domain"
               type: "TenantID"
           - column: "audit.chain_head.pool_id"
             go_type:
-              import: "github.com/laenen-ai/audit/internal/domain"
+              import: "github.com/laenenai/audit/internal/domain"
               type: "PoolID"
           # The two timestamptz columns map to time.Time rather than to
           # pgtype.Timestamptz, which is what pgx/v5 would otherwise produce

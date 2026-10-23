@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // DefaultHashPartitions is how many hash partitions audit.event gets unless

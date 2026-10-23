@@ -33,8 +33,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/migrate"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/migrate"
 )
 
 // postgresImage is the container image used when TEST_DATABASE_URL is not

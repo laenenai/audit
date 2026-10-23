@@ -38,7 +38,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // defaultPageSize is how many entries Verify reads per call when

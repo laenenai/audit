@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laenen-ai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/domain"
 )
 
 // writer is the shared primitive the two reference encoders below are
@@ -94,13 +94,13 @@ func referenceEncodeV1(e domain.Event) []byte {
 // referenceDigest recomputes an entry digest the way chain.go's doc comment
 // describes it, independently of chain.go's code.
 func referenceDigest(prev domain.Digest, e domain.Event) domain.Digest {
-	return taggedDigest("laenen-ai/audit:entry:v2", prev, referenceEncode(e))
+	return taggedDigest("laenenai/audit:entry:v2", prev, referenceEncode(e))
 }
 
 // referenceDigestV1 is the frozen version 1 digest, with version 1's
 // domain-separation tag. See referenceEncodeV1.
 func referenceDigestV1(prev domain.Digest, e domain.Event) domain.Digest {
-	return taggedDigest("laenen-ai/audit:entry:v1", prev, referenceEncodeV1(e))
+	return taggedDigest("laenenai/audit:entry:v1", prev, referenceEncodeV1(e))
 }
 
 // taggedDigest is SHA-256( len(tag) || tag || prev || canonical ), the

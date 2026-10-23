@@ -13,11 +13,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/laenen-ai/audit"
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/migrate"
-	"github.com/laenen-ai/audit/internal/pglog"
-	"github.com/laenen-ai/audit/internal/testdb"
+	"github.com/laenenai/audit"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/migrate"
+	"github.com/laenenai/audit/internal/pglog"
+	"github.com/laenenai/audit/internal/testdb"
 )
 
 // asAppRole runs fn inside a transaction that has switched into the

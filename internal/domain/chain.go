@@ -69,12 +69,12 @@
 //
 // Version history:
 //
-//   - **0x01**, tag "laenen-ai/audit:entry:v1". Fields 4 onwards of the list
+//   - **0x01**, tag "laenenai/audit:entry:v1". Fields 4 onwards of the list
 //     above, with no chain identifier: the first increment treated one Log as
 //     one chain, so there was nothing to name. Its recorded test vector is
 //     kept, still reproducible from a frozen reference encoder, in
 //     TestEntryDigestGoldenVectorV1.
-//   - **0x02**, tag "laenen-ai/audit:entry:v2", current. Adds Chain.Tenant and
+//   - **0x02**, tag "laenenai/audit:entry:v2", current. Adds Chain.Tenant and
 //     Chain.Pool immediately after the version byte, because a shared store
 //     holds many chains and an entry that does not commit to its own chain can
 //     be moved between them.
@@ -107,7 +107,7 @@ const canonicalVersion byte = 0x02
 // digest. Without it, a SHA-256 digest computed by this module over some
 // other protocol's bytes could be mistaken for an entry digest, and
 // vice versa. It changes whenever canonicalVersion does.
-const entryDomainTag = "laenen-ai/audit:entry:v2"
+const entryDomainTag = "laenenai/audit:entry:v2"
 
 // FirstSequence is the sequence number of the first entry in every chain.
 // Numbering starts at 1 rather than 0 so that the zero Checkpoint — the

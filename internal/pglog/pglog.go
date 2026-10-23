@@ -76,8 +76,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/eventlog"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/eventlog"
 )
 
 // Schema is this adapter's copy of the schema name internal/migrate

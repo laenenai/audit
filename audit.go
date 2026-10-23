@@ -5,7 +5,7 @@
 // adapter in internal/eventlog, the Postgres adapter in internal/pglog and
 // the schema in internal/migrate; this file re-exports the ones a
 // consumer must name as type aliases, so an importer of
-// github.com/laenen-ai/audit gets one import and never reaches into an
+// github.com/laenenai/audit gets one import and never reaches into an
 // internal package directly (Go's internal package rule would refuse that
 // anyway). Aliasing also means a value the internals produce — an
 // audit.Entry returned from a log — and a value a consumer holds are the
@@ -31,10 +31,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/laenen-ai/audit/internal/domain"
-	"github.com/laenen-ai/audit/internal/eventlog"
-	"github.com/laenen-ai/audit/internal/migrate"
-	"github.com/laenen-ai/audit/internal/pglog"
+	"github.com/laenenai/audit/internal/domain"
+	"github.com/laenenai/audit/internal/eventlog"
+	"github.com/laenenai/audit/internal/migrate"
+	"github.com/laenenai/audit/internal/pglog"
 )
 
 type (
