@@ -1,8 +1,9 @@
 // Package audit is the public facade for the audit module: an append-only
 // hash-chained event log that can be independently verified.
 //
-// Every value object lives in internal/domain and the port and its
-// adapters live in internal/eventlog; this file re-exports the ones a
+// Every value object lives in internal/domain, the port and its in-memory
+// adapter in internal/eventlog, the Postgres adapter in internal/pglog and
+// the schema in internal/migrate; this file re-exports the ones a
 // consumer must name as type aliases, so an importer of
 // github.com/laenen-ai/audit gets one import and never reaches into an
 // internal package directly (Go's internal package rule would refuse that
@@ -27,8 +28,13 @@ package audit
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/laenen-ai/audit/internal/domain"
 	"github.com/laenen-ai/audit/internal/eventlog"
+	"github.com/laenen-ai/audit/internal/migrate"
+	"github.com/laenen-ai/audit/internal/pglog"
 )
 
 type (
@@ -42,6 +48,22 @@ type (
 	VerifyOptions = eventlog.VerifyOptions
 	// MemoryConfig configures NewMemory. See eventlog.MemoryConfig.
 	MemoryConfig = eventlog.MemoryConfig
+
+	// Config configures Open: the database handle, the chain, and whether
+	// the deployment requires Postgres to be enforcing append-only. See
+	// pglog.Config.
+	Config = pglog.Config
+	// DB is the narrow Postgres handle Open reads and writes through, which
+	// a tenancy data-plane handle satisfies without this module depending on
+	// tenancy. See pglog.DB.
+	DB = pglog.DB
+	// Enforcement is what the database actually enforces about append-only,
+	// for one role. See pglog.Enforcement.
+	Enforcement = pglog.Enforcement
+
+	// MigrateConfig configures Migrate: the application role whose name the
+	// REVOKE must carry, and the partitioning. See migrate.Config.
+	MigrateConfig = migrate.Config
 
 	// Record is what a caller submits to a log. See domain.Record.
 	Record = domain.Record
@@ -164,4 +186,61 @@ func VerifyEntries(entries []Entry, opt VerifyOptions) (Checkpoint, error) {
 // eventlog.NewMemory.
 func NewMemory(cfg MemoryConfig) Log {
 	return eventlog.NewMemory(cfg)
+}
+
+// Open returns a Postgres-backed Log for one chain: the durable,
+// append-only, hash-chained store this module exists to provide. See
+// pglog.Open.
+//
+// It does not migrate anything — Migrate does, as a different identity with
+// privileges this one is deliberately not meant to have. What Open does do
+// is check whether that separation is actually in effect and report loudly
+// when it is not, because a deployment running as the owner role has an
+// audit log its own application could rewrite and nothing about the
+// behaviour says so. See Config.RequireAppendOnlyEnforcement.
+func Open(ctx context.Context, cfg Config) (Log, error) {
+	return pglog.Open(ctx, cfg)
+}
+
+// Migrate applies this module's schema to pool: its own schema "audit", with
+// its own goose version table inside it, so that a consumer's migrations and
+// this module's cannot collide on one version table. See migrate.Up.
+//
+// pool must connect as a role that owns — or can create and grant in —
+// schema "audit", and that role must not be the one the application runs as.
+// That is the whole of the append-only guarantee: the application cannot
+// UPDATE or DELETE what the owner created. A deployment may keep the two as
+// two connection strings, or as one owner string that the runtime narrows
+// with Config.AppRole.
+//
+// It takes a concrete *pgxpool.Pool rather than the narrow DB interface Open
+// takes, because goose needs a database/sql handle and pgx can only build
+// one from a real pool. Migration is a deployment-time operation with a
+// deployment-time handle, so that is the right place for the concession.
+//
+// Calling it again is safe and expected: it applies nothing already applied,
+// extends the partition window as time moves on, and re-asserts the
+// privileges.
+func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg MigrateConfig) error {
+	return migrate.Up(ctx, pool, cfg)
+}
+
+// CheckEnforcement reports what the database enforces about append-only for
+// role, or for the role the handle connects as when role is empty. Open
+// calls it and reports the result; this is here so a deployment's own health
+// check can ask the same question rather than reimplementing it. See
+// pglog.CheckEnforcement.
+func CheckEnforcement(ctx context.Context, db DB, role string) (Enforcement, error) {
+	return pglog.CheckEnforcement(ctx, db, role)
+}
+
+// WithTx returns a context carrying tx, so that an Append made with it joins
+// the caller's transaction rather than committing on its own: the audit
+// record and the thing it audits then commit together or not at all.
+//
+// A denial has no transaction to join and must still be recorded — nothing
+// happened, and the record has to survive regardless. That is simply an
+// Append with a context this was never called on. See pglog.WithTx.
+func WithTx(ctx context.Context, tx pgx.Tx) context.Context {
+	return pglog.WithTx(ctx, tx)
 }

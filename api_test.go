@@ -27,11 +27,20 @@ var updateAPI = flag.Bool("update-api", false, "rewrite api.txt from the current
 // follow because the facade re-exports them as aliases, so a change to an
 // internal signature is a change to the public surface even though Go's
 // internal rule keeps the import path private.
+//
+// internal/migrate and internal/pglog are here for exactly that reason: the
+// facade's Migrate and Open take their Config types as aliases, so the shape
+// of a Config a consumer fills in is public surface. internal/testdb is not,
+// because nothing on the facade names it — it is a test harness, and a
+// consumer adopting this module runs audittest against its own wiring rather
+// than this module's containers.
 var apiPackages = []string{
 	".",
 	"audittest",
 	"internal/domain",
 	"internal/eventlog",
+	"internal/migrate",
+	"internal/pglog",
 }
 
 const apiHeader = `# Public API of github.com/laenen-ai/audit, as a golden file.

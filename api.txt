@@ -35,11 +35,19 @@ type ChainID = domain.ChainID
 
 type ChainLink = domain.ChainLink
 
+func CheckEnforcement(ctx context.Context, db DB, role string) (Enforcement, error)
+
 type Checkpoint = domain.Checkpoint
 
 type Clock = domain.Clock
 
+type Config = pglog.Config
+
+type DB = pglog.DB
+
 type Digest = domain.Digest
+
+type Enforcement = pglog.Enforcement
 
 type Entry = domain.Entry
 
@@ -75,7 +83,13 @@ const MaxDetailLen = domain.MaxDetailLen
 
 type MemoryConfig = eventlog.MemoryConfig
 
+func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg MigrateConfig) error
+
+type MigrateConfig = migrate.Config
+
 func NewMemory(cfg MemoryConfig) Log
+
+func Open(ctx context.Context, cfg Config) (Log, error)
 
 type Outcome = domain.Outcome
 
@@ -94,6 +108,8 @@ func Verify(ctx context.Context, log Log, opt VerifyOptions) (Checkpoint, error)
 func VerifyEntries(entries []Entry, opt VerifyOptions) (Checkpoint, error)
 
 type VerifyOptions = eventlog.VerifyOptions
+
+func WithTx(ctx context.Context, tx pgx.Tx) context.Context
 
 package audittest // audittest
 
@@ -293,3 +309,76 @@ type VerifyOptions struct {
 	Witness domain.Checkpoint
 	PageSize int
 }
+
+package migrate // internal/migrate
+
+type Applied struct {
+	Version int64
+	Name string
+	Applied bool
+	AppliedAt time.Time
+}
+
+type Config struct {
+	AppRole string
+	HashPartitions int
+	MonthsAhead int
+	MonthsBehind int
+	Clock domain.Clock
+}
+
+const DefaultHashPartitions = 64
+
+const DefaultMonthsAhead = 12
+
+const DefaultMonthsBehind = 1
+
+func HashPartitionName(i int) string
+
+func RangePartitionName(i int, at time.Time) string
+
+const Schema = "audit"
+
+func Status(ctx context.Context, pool *pgxpool.Pool) ([]Applied, error)
+
+func Up(ctx context.Context, pool *pgxpool.Pool, cfg Config) error
+
+package pglog // internal/pglog
+
+func CheckEnforcement(ctx context.Context, db DB, role string) (Enforcement, error)
+
+type Config struct {
+	DB DB
+	Chain domain.ChainID
+	AppRole string
+	RequireAppendOnlyEnforcement bool
+	Logger *slog.Logger
+	Clock domain.Clock
+}
+
+type DB interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+type Enforcement struct {
+	Role string
+	AppendOnly bool
+	Superuser bool
+	BypassRLS bool
+	OwnsHistory bool
+	CanUpdate bool
+	CanDelete bool
+	CanTruncate bool
+	TriggerPresent bool
+	RowSecurityForced bool
+	Findings []string
+}
+
+func Open(ctx context.Context, cfg Config) (eventlog.Log, error)
+
+const Schema = "audit"
+
+func WithTx(ctx context.Context, tx pgx.Tx) context.Context
