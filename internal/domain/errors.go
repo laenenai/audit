@@ -58,6 +58,53 @@ var ErrMalformedDigest = errors.New("audit: malformed digest")
 // exactly 32 lowercase hex characters.
 var ErrMalformedEventID = errors.New("audit: malformed event id")
 
+// ErrInvalidConfig means the module was wired up wrongly, and no amount of
+// retrying will help: a missing application role name, a chain identifier
+// with no tenant, a migration that does not fit the database it was pointed
+// at. It is the "fix the deployment" sentinel, as distinct from
+// ErrUnavailable's "try again".
+var ErrInvalidConfig = errors.New("audit: invalid configuration")
+
+// ErrUnavailable means the store is reachable in principle but was not
+// reachable, or not usable, just now: a refused connection, a migration
+// waiting on another process's lock, a transaction Postgres asked the caller
+// to retry. It is the one sentinel in this module that invites a retry.
+var ErrUnavailable = errors.New("audit: store unavailable")
+
+// ErrStorage means the store refused or failed the operation for a reason
+// that is neither configuration nor transient: a constraint it would not let
+// us satisfy, a row that would not scan, a privilege that is not held.
+//
+// Errors wrapping it never carry the database's own message text. Postgres
+// echoes offending values into some of its messages, and one of the columns
+// involved here holds an event's opaque detail payload, which may be
+// sensitive; the rule in this module is that an adapter maps a SQLSTATE onto
+// a sentinel and drops everything the database said. That is the same rule
+// as "no event content in errors" rather than an extra one, and it is what
+// the suite's NoEventDetailLeaksInErrors subtest holds every adapter to.
+// Migration errors are the deliberate exception: they are about DDL rather
+// than rows, nothing in them has seen an event, and an operator needs to
+// know what Postgres actually objected to.
+var ErrStorage = errors.New("audit: store rejected the operation")
+
+// ErrNoAppendOnlyEnforcement means the deployment has no privilege
+// separation, so append-only is enforced by the Go API and by nothing else —
+// which is to say, not at all against an application that has been
+// compromised.
+//
+// The port offers no Update, no Delete and no Truncate, and that is
+// necessary and nowhere near sufficient: a compromised application holding
+// DELETE on the history table can truncate the log, and the Go type system
+// has nothing to say about it. Enforcement is the database's job — the
+// tables are owned by a role the application is not, the application role
+// holds INSERT and SELECT only, and UPDATE, DELETE and TRUNCATE are revoked.
+//
+// A deployment is free to decline that and still get a working audit log.
+// What it must not do is assume it has a guarantee it does not have, so this
+// condition is detected when the log is opened and said out loud, and a
+// deployment that wants it to be fatal asks for that in configuration.
+var ErrNoAppendOnlyEnforcement = errors.New("audit: append-only is not enforced by the database")
+
 // BreakKind names how a chain failed to verify. The set is closed: a
 // verifier that cannot classify a failure as one of these has found a bug
 // in the verifier, not a new kind of tampering.

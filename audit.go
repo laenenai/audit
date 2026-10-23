@@ -105,6 +105,21 @@ var (
 	ErrMalformedDigest = domain.ErrMalformedDigest
 	// ErrMalformedEventID is domain.ErrMalformedEventID.
 	ErrMalformedEventID = domain.ErrMalformedEventID
+
+	// ErrInvalidConfig is domain.ErrInvalidConfig: the module was wired up
+	// wrongly and no retry will help.
+	ErrInvalidConfig = domain.ErrInvalidConfig
+	// ErrUnavailable is domain.ErrUnavailable: the store is reachable in
+	// principle but was not just now. The one sentinel here that invites a
+	// retry.
+	ErrUnavailable = domain.ErrUnavailable
+	// ErrStorage is domain.ErrStorage: the store refused or failed the
+	// operation, for a reason that is neither configuration nor transient.
+	ErrStorage = domain.ErrStorage
+	// ErrNoAppendOnlyEnforcement is domain.ErrNoAppendOnlyEnforcement: this
+	// deployment has no privilege separation, so append-only is enforced by
+	// the Go API and by nothing else.
+	ErrNoAppendOnlyEnforcement = domain.ErrNoAppendOnlyEnforcement
 )
 
 // BreakKind values: how a chain failed to verify. The set is closed; see
