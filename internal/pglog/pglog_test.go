@@ -732,7 +732,7 @@ func TestPostgres_ACanceledAppendLeavesNoOpenTransaction(t *testing.T) {
 // declares, which is what lets one code path run standalone and enlisted.
 var (
 	_ pglog.DB = (*pgxpool.Pool)(nil)
-	_ pglog.DB = (pgx.Tx)(nil)
+	_ pglog.DB = pgx.Tx(nil)
 )
 
 // Verification pages through the chain and then asks for the head, and each
