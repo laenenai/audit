@@ -91,7 +91,12 @@ the query API are not yet built.
 - [`CHARTER.md`](CHARTER.md) — the boundary and the two mechanisms that enforce it
 - [`SECURITY.md`](SECURITY.md)
 - `docs/superpowers/specs/` — the Postgres backend's design decisions, including why the privilege grants are *reconciled on every run* rather than applied by a versioned migration
-- `api.txt` — the public surface as a golden file, diffed in CI
+- [`CHANGELOG.md`](CHANGELOG.md) and [`UPGRADING.md`](UPGRADING.md) — release notes and migration steps
+
+API compatibility is compared with the last root tag by `mise run api-diff`
+(apidiff; `internal/...` packages are ignored) and validated on a clean release
+by `mise run release-check` (gorelease). Pre-1.0 incompatible changes are
+reported and documented, not fatal.
 
 ## License
 

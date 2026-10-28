@@ -1,5 +1,9 @@
 # Toolchain and tasks for a shared laenen-ai module.
 #
+# This file is the single source of tool versions. CI installs mise and runs
+# `mise run check`; it does not pin gofumpt, golangci-lint or sqlc a second
+# time in workflow YAML.
+#
 # Derived from cas/mise.toml but deliberately NOT a copy: cas's migrate, dev,
 # up, down, reset, db and observability tasks reference ./cmd/casd and
 # deploy/compose/, neither of which exists in a library module, and its
@@ -12,9 +16,9 @@
 # sqlc.
 
 [tools]
-go            = "1.25.6"
-golangci-lint = "2.11.4"
-gofumpt       = "0.9.2"
+go            = "1.27.3"
+golangci-lint = "2.15.0"
+gofumpt       = "0.12.0"
 # sqlc is pinned because the generated code is committed and its header
 # records the version that wrote it: an unpinned generator makes every
 # developer's `generate` a diff. cas is on 1.31.1; this module is on the
@@ -59,13 +63,21 @@ description = "Regenerate internal/pglog/gen from db/queries against db/migratio
 # succeeded while printing a message nobody reads.
 run = "sqlc generate"
 
-[tasks.api]
-description = "Regenerate api.txt, the public-surface golden file the charter requires."
-# The golden file is checked by an ordinary test (api_test.go), which is why
-# there is no api-check task: `test` and `test-all` already verify it, so the
-# check cannot be forgotten. This task only rewrites it, deliberately.
-# A module with no api_test.go yet matches no test and this is a no-op.
-run = "go test ./... -run TestAPIGolden -update-api"
+[tasks.generate-check]
+description = "Fail if generated sqlc code or the query/schema inputs are stale."
+run = "sqlc diff"
+
+[tasks.vuln]
+description = "Report reachable Go vulnerabilities."
+run = "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./..."
+
+[tasks.api-diff]
+description = "Compare the importable API with the last root tag using apidiff."
+run = "bash scripts/api-diff.sh"
+
+[tasks.release-check]
+description = "Validate a clean release tree with gorelease (run from a clean checkout)."
+run = "go run golang.org/x/exp/cmd/gorelease@v0.0.0-20261014143641-f0251eb4aa3e -base=latest"
 
 [tasks.check]
-depends = ["fmt-check", "lint", "build", "test-all"]
+depends = ["fmt-check", "lint", "build", "test-all", "generate-check", "vuln", "api-diff"]

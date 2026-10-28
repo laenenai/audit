@@ -10,9 +10,13 @@ A shared module with no stated boundary accretes until it is the dependency
 every project has and nobody can reason about. This charter is the boundary.
 Two mechanisms enforce it rather than merely stating it:
 
-1. **`api.txt`** in this repo is the module's public API as a golden file,
-   diffed in CI. Growing the public surface requires a reviewed diff, so a new
-   responsibility cannot slip in quietly.
+1. **The importable API is diffed against the last root release tag** by
+   `mise run api-diff` (apidiff; `internal/...` is outside the compatibility
+   contract), and a clean release is validated by `mise run release-check`
+   (gorelease). Growing the public surface requires a reviewed diff, so a new
+   responsibility cannot slip in quietly. Pre-1.0 incompatible changes are
+   reported and recorded in `CHANGELOG.md` and `UPGRADING.md`; from 1.0 they
+   fail the gate.
 2. **The conformance suite** (`suite.go`, following the pattern of
    `cas/internal/blob/suite.go`) is the contract. A consumer counts as
    *adopted* when this module's suite runs green in that consumer's CI against
